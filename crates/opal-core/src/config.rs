@@ -56,6 +56,8 @@ pub struct Identity {
     pub mode: IdentityMode,
     /// npub used in read-only mode.
     pub npub: Option<String>,
+    /// The NIP-05 address that npub was looked up from, for display.
+    pub nip05: Option<String>,
     /// bunker:// URI used in external mode.
     pub bunker_uri: Option<String>,
 }

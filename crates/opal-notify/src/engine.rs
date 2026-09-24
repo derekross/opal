@@ -144,6 +144,15 @@ struct Lists {
 
 impl Runner {
     async fn run(mut self) {
+        // First time for this account: the history we are about to catch up
+        // on is not "new", so don't count it as unread.
+        if self.store.last_seen(&self.me_hex).unwrap_or(0) == 0
+            && self.store.last_read(&self.me_hex).unwrap_or(0) == 0
+        {
+            let _ = self
+                .store
+                .mark_read(&self.me_hex, self.started.saturating_sub(1));
+        }
         let mut notifications = self.client.notifications();
         let bootstrap = parse_relays(&self.cfg.bootstrap_relays);
         for r in &bootstrap {

@@ -88,6 +88,9 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         limit: u32,
     },
+    /// Watch someone's notifications without a key: an npub or a NIP-05
+    /// address like derekross@grownostr.org.
+    Watch { who: String },
     /// Show recent notifications (replies, mentions, reactions, zaps, DMs).
     Inbox {
         #[arg(long, default_value_t = 20)]
@@ -107,8 +110,8 @@ enum Cmd {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
-    /// Print events as they happen.
-    Watch,
+    /// Print daemon events as they happen (debugging).
+    Events,
     /// Send a raw request: `opal raw <method> '<json params>'`.
     Raw {
         method: String,
@@ -331,6 +334,17 @@ async fn run() -> Result<()> {
                 print_log(&l);
             }
         }
+        Cmd::Watch { who } => {
+            let r = c.call("identity.watch", json!({"input": who})).await?;
+            println!(
+                "Watching {}{}",
+                r["nip05"]
+                    .as_str()
+                    .map(|n| format!("{n} · "))
+                    .unwrap_or_default(),
+                r["npub"].as_str().unwrap_or_default()
+            );
+        }
         Cmd::Inbox { limit, read } => {
             let l = c
                 .call("notifications.list", json!({"limit": limit}))
@@ -394,7 +408,7 @@ async fn run() -> Result<()> {
             c.call("online.set", json!({"online": state == "on"}))
                 .await?;
         }
-        Cmd::Watch => {
+        Cmd::Events => {
             c.call("subscribe", json!(null)).await?;
             loop {
                 if let IpcMessage::Event(e) = c.read().await? {

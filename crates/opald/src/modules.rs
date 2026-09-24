@@ -92,6 +92,10 @@ async fn forward(app: Arc<App>, mut rx: tokio::sync::broadcast::Receiver<NotifyE
             tokio::spawn(async move { notify::nostr_popup(&app, n).await });
         }
         app.emit("notify", serde_json::to_value(&ev).unwrap_or_default());
+        if matches!(ev, NotifyEvent::Updated) {
+            // Profiles arrived: the header may show the watched person now.
+            app.emit_state().await;
+        }
         if matches!(ev, NotifyEvent::New { .. }) {
             app.emit("unread", json!({"count": app.unread_notifications().await}));
         }

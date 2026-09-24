@@ -45,10 +45,8 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let config = match &args.config {
-        Some(p) => Config::load_from(p)?,
-        None => Config::load()?,
-    };
+    let config_path = args.config.clone().unwrap_or_else(paths::config_file);
+    let config = Config::load_from(&config_path)?;
     let db = match &args.db {
         Some(p) => Db::open(p)?,
         None => Db::open_default()?,
@@ -62,7 +60,13 @@ async fn main() -> Result<()> {
             .context("connecting to the Secret Service (is gnome-keyring running?)")?
     };
 
-    let app = app::App::new(app::Options { config, db, store }).await?;
+    let app = app::App::new(app::Options {
+        config,
+        config_path,
+        db,
+        store,
+    })
+    .await?;
     // Relays can be slow to answer; the socket (and so the UI) comes up at once.
     let signer = app.signer.clone();
     tokio::spawn(async move {
@@ -91,5 +95,16 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// nostr-sdk (websockets) and reqwest (NIP-05) both use rustls. If two
+    /// crypto backends get compiled in, rustls can't pick one and every TLS
+    /// connection panics at runtime. Keep it to exactly one.
+    #[test]
+    fn rustls_has_a_single_crypto_provider() {
+        let _ = rustls::ClientConfig::builder();
     }
 }

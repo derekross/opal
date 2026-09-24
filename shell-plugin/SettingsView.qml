@@ -36,27 +36,73 @@ Column {
   }
 
   PanelSectionHeader { text: "IDENTITY"; foreground: root.dim }
+  property string watchError: ""
+  property bool watchBusy: false
+  function watch(input) {
+    if (input.trim() === "") return
+    watchBusy = true
+    watchError = ""
+    svc.call("identity.watch", { input: input.trim() }, function(err) {
+      root.watchBusy = false
+      if (err) { root.watchError = err; return }
+      root.svc.refreshConfig()
+    })
+  }
+  readonly property bool watching: !!root.cfg.identity && root.cfg.identity.mode === "read-only"
+
   ButtonGroup {
     width: parent.width
     options: [
       { value: "local", label: "My key (signer)", tooltip: "Use the account selected in Profiles" },
-      { value: "read-only", label: "Watch an npub", tooltip: "Notifications only, no key needed" }
+      { value: "read-only", label: "Watch someone", tooltip: "Notifications only, no key needed" }
     ]
-    value: (root.cfg.identity && root.cfg.identity.mode === "read-only") ? "read-only" : "local"
+    value: root.watching ? "read-only" : "local"
     foreground: root.foreground
     onChanged: function(v) {
       if (v === "local") root.set({ identity: { mode: "local" } })
-      else if (npubField.text.trim().indexOf("npub1") === 0) root.set({ identity: { mode: "read-only", npub: npubField.text.trim() } })
-      else npubField.forceActiveFocus()
+      else if (watchField.text.trim() !== "") root.watch(watchField.text)
+      else watchField.forceActiveFocus()
     }
   }
-  TextField {
-    id: npubField
+  Text {
     width: parent.width
-    placeholderText: "npub to watch"
-    text: root.cfg.identity && root.cfg.identity.npub ? root.cfg.identity.npub : ""
-    foreground: root.foreground
-    onAccepted: if (text.trim().indexOf("npub1") === 0) root.set({ identity: { mode: "read-only", npub: text.trim() } })
+    visible: root.watching
+    elide: Text.ElideMiddle
+    color: root.dim
+    font.family: Style.font.family
+    font.pixelSize: Style.font.caption
+    text: root.watching
+      ? "Watching " + (root.cfg.identity.nip05 || "") + (root.cfg.identity.nip05 ? " · " : "") + (root.cfg.identity.npub || "")
+      : ""
+  }
+  Row {
+    width: parent.width
+    spacing: Style.space(8)
+    TextField {
+      id: watchField
+      width: parent.width - watchButton.width - parent.spacing
+      placeholderText: "npub or name@domain to watch"
+      foreground: root.foreground
+      onAccepted: root.watch(text)
+    }
+    Button {
+      id: watchButton
+      anchors.verticalCenter: watchField.verticalCenter
+      text: root.watchBusy ? "Looking up…" : "Watch"
+      iconSpinning: root.watchBusy
+      bordered: true
+      foreground: root.foreground
+      onClicked: root.watch(watchField.text)
+    }
+  }
+  Text {
+    width: parent.width
+    visible: root.watchError !== ""
+    wrapMode: Text.Wrap
+    color: root.urgent
+    font.family: Style.font.family
+    font.pixelSize: Style.font.bodySmall
+    text: root.watchError
   }
 
   PanelSectionHeader { text: "LOCK AFTER"; foreground: root.dim }

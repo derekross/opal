@@ -7,6 +7,7 @@ edition = "2024"
 dirs = "7.0.0"
 nostr = { version = "0.45", features = ["nip04", "nip06", "nip44", "nip46", "nip49", "nip59", "os-rng"] }
 oo7 = "0.6.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }

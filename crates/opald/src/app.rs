@@ -22,6 +22,8 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 
 pub struct App {
     pub config: RwLock<Config>,
+    /// Where `config` was loaded from; settings are saved back there.
+    pub config_path: std::path::PathBuf,
     pub vault: Arc<Vault>,
     pub accounts: Accounts,
     pub signer: Signer,
@@ -39,13 +41,19 @@ pub struct App {
 
 pub struct Options {
     pub config: Config,
+    pub config_path: std::path::PathBuf,
     pub db: Db,
     pub store: SecretStore,
 }
 
 impl App {
     pub async fn new(opts: Options) -> Result<Arc<Self>> {
-        let Options { config, db, store } = opts;
+        let Options {
+            config,
+            config_path,
+            db,
+            store,
+        } = opts;
         let vault = Arc::new(Vault::new(store));
         let accounts = Accounts::new(db.clone()).context("accounts table")?;
         // Keep account details in step with the keyring (e.g. after a restore).
@@ -72,6 +80,7 @@ impl App {
         let (events, _) = broadcast::channel(256);
         Ok(Arc::new(Self {
             config: RwLock::new(config),
+            config_path,
             vault,
             accounts,
             signer,
@@ -154,7 +163,24 @@ impl App {
                 v
             })
             .collect();
+        // In read-only mode, who is being watched (profile from the notifications cache).
+        let watched = cfg
+            .identity
+            .npub
+            .as_deref()
+            .filter(|_| cfg.identity.mode == opal_core::config::IdentityMode::ReadOnly)
+            .and_then(|n| PublicKey::parse(n).ok())
+            .map(|pk| {
+                let profile = self.notify_store.profile(&pk.to_hex()).ok().flatten().map(|(p, _)| p);
+                json!({
+                    "npub": pk.to_bech32().ok(),
+                    "nip05": cfg.identity.nip05,
+                    "name": profile.as_ref().and_then(|p| p.display_name.clone().or_else(|| p.name.clone())),
+                    "picture": profile.as_ref().and_then(|p| p.picture.clone()),
+                })
+            });
         json!({
+            "watched": watched,
             "locked": !self.vault.is_unlocked(),
             "online": self.is_online(),
             "has_accounts": !accounts.is_empty(),

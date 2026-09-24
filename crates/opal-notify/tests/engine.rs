@@ -169,6 +169,7 @@ async fn notifications_end_to_end() {
     assert_eq!(dm.n.author, alice.public_key().to_hex());
     assert_eq!(dm.n.detail, "", "no previews unless enabled");
 
+    // Everything above arrived after the engine started, so it's all unread.
     assert_eq!(store.unread_count(&me.to_hex()).unwrap(), 3);
     engine.stop().await;
 }

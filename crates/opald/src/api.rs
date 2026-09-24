@@ -330,7 +330,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let mut current = serde_json::to_value(&*app.config.read().await)?;
             merge(&mut current, params);
             let new: Config = serde_json::from_value(current).context("invalid settings")?;
-            new.save()?;
+            new.save_to(&app.config_path)?;
             *app.config.write().await = new.clone();
             crate::modules::reconcile(app).await;
             app.emit_state().await;
@@ -364,6 +364,29 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             write_private(&path, svg.as_bytes())?;
             Ok(json!({"path": path}))
         }
+        // ── Identity ────────────────────────────────────────────────────
+        "identity.resolve" => {
+            // npub, nprofile, hex, or a NIP-05 address.
+            let p: Input = parse(params)?;
+            Ok(json!(opal_core::identity::resolve(&p.input).await?))
+        }
+        "identity.watch" => {
+            // Watch someone (read-only): resolve, save, turn notifications on.
+            let p: Input = parse(params)?;
+            let r = opal_core::identity::resolve(&p.input).await?;
+            {
+                let mut cfg = app.config.write().await;
+                cfg.identity.mode = opal_core::config::IdentityMode::ReadOnly;
+                cfg.identity.npub = Some(r.npub.clone());
+                cfg.identity.nip05 = r.nip05.clone();
+                cfg.modules.notifications = true;
+                cfg.save_to(&app.config_path)?;
+            }
+            crate::modules::reconcile(app).await;
+            app.emit_state().await;
+            Ok(json!(r))
+        }
+
         // ── Notifications ───────────────────────────────────────────────
         "notifications.status" => {
             let enabled = app.config.read().await.modules.notifications;
@@ -447,7 +470,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 if !cfg.notifications.blocked.contains(&hex) {
                     cfg.notifications.blocked.push(hex);
                 }
-                cfg.save()?;
+                cfg.save_to(&app.config_path)?;
             }
             crate::modules::reconcile(app).await;
             Ok(json!({"ok": true}))
@@ -636,6 +659,11 @@ struct Passphrase {
 #[derive(Deserialize)]
 struct Id {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct Input {
+    input: String,
 }
 
 #[derive(Deserialize)]

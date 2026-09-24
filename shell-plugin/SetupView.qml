@@ -19,11 +19,14 @@ Column {
   function submit() {
     error = ""
     if (mode === "watch") {
-      var npub = watchField.text.trim()
-      if (npub.indexOf("npub1") !== 0) { error = "Paste an npub."; return }
-      svc.call("config.set", { identity: { mode: "read-only", npub: npub }, modules: { notifications: true } }, function(err, r) {
+      var who = watchField.text.trim()
+      if (who === "") { error = "Enter an npub or a NIP-05 address."; return }
+      busy = true
+      svc.call("identity.watch", { input: who }, function(err) {
+        root.busy = false
         if (err) { root.error = err; return }
-        root.svc.config = r
+        watchField.text = ""
+        root.svc.refreshConfig()
       })
       return
     }
@@ -57,7 +60,7 @@ Column {
     options: [
       { value: "import", label: "Import key" },
       { value: "generate", label: "New key" },
-      { value: "watch", label: "Just watch an npub" }
+      { value: "watch", label: "Watch someone" }
     ]
     value: root.mode
     foreground: root.foreground
@@ -71,13 +74,13 @@ Column {
     color: root.dim
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
-    text: "Read-only: see notifications for any npub without a key. You can add your key later to sign and read DMs."
+    text: "Read-only: see notifications for anyone, no key needed. Enter an npub or a NIP-05 address like you@example.com. You can add your key later to sign and read DMs."
   }
   TextField {
     id: watchField
     width: parent.width
     visible: root.mode === "watch"
-    placeholderText: "npub1…"
+    placeholderText: "npub1… or name@domain"
     foreground: root.foreground
     onAccepted: root.submit()
   }
@@ -140,7 +143,8 @@ Column {
   }
 
   Button {
-    text: root.busy ? "Encrypting…" : root.mode === "import" ? "Import key" : root.mode === "watch" ? "Watch" : "Create key"
+    text: root.busy ? (root.mode === "watch" ? "Looking up…" : "Encrypting…")
+      : root.mode === "import" ? "Import key" : root.mode === "watch" ? "Watch" : "Create key"
     iconText: "󰌆"
     iconSpinning: root.busy
     bordered: true

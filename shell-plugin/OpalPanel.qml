@@ -110,7 +110,9 @@ Item {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             size: Style.space(40)
-            picture: root.svc && root.svc.currentAccount ? (root.svc.currentAccount.picture || "") : ""
+            picture: !root.svc ? ""
+              : root.svc.currentAccount ? (root.svc.currentAccount.picture || "")
+              : (root.svc.status.watched && root.svc.status.watched.picture) || ""
             foreground: root.foreground
           }
 
@@ -134,7 +136,8 @@ Item {
                 if (!root.up) return "Opal"
                 var a = root.svc.currentAccount
                 if (a) return a.label
-                return root.svc.readOnly ? "Watching" : "Opal"
+                var w = root.svc.status.watched
+                return root.svc.readOnly ? ((w && w.name) || "Watching") : "Opal"
               }
             }
             Text {
@@ -146,7 +149,7 @@ Item {
               text: {
                 if (!root.up) return "The Opal daemon isn't running"
                 var a = root.svc.currentAccount
-                if (!a) return root.svc.readOnly ? U.shortKey(root.svc.identity.npub) + " · read-only" : "Nostr signer"
+                if (!a) return root.svc.readOnly ? (root.svc.identity.nip05 || U.shortKey(root.svc.identity.npub)) + " · read-only" : "Nostr signer"
                 return (root.svc.locked ? "Locked · " : "Unlocked · ") + U.shortKey(a.npub)
               }
               MouseArea {
