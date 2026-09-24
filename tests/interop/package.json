@@ -1,0 +1,7 @@
+{
+  "name": "opal-interop",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node client.mjs" },
+  "dependencies": { "nostr-tools": "^2.25.2" }
+}
