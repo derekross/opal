@@ -1,0 +1,31 @@
+[Unit]
+Description=Opal Nostr signer
+Documentation=https://github.com/derekross/opal
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/opald
+Restart=on-failure
+RestartSec=3
+
+# Hardening. The daemon needs: its data/config dirs, the runtime dir for its
+# socket, the session bus (keyring) and the system bus (logind signals).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/opal %h/.config/opal %t
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "opal",
+  "name": "Opal",
+  "version": "0.1.0",
+  "author": "Derek Ross",
+  "license": "MIT",
+  "description": "Nostr signer (NIP-46 bunker) in the Omarchy bar: accounts, connected apps, approvals and activity.",
+  "kinds": ["service", "bar-widget", "overlay"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "OpalService.qml",
+    "barWidget": "Widget.qml",
+    "overlay": "Approval.qml"
+  },
+  "barWidget": {
+    "displayName": "Opal",
+    "description": "Your Nostr keys and the apps allowed to use them.",
+    "category": "Nostr",
+    "aliases": ["nostr", "signer", "bunker"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}

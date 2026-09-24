@@ -1,6 +1,7 @@
-//! Desktop notifications (org.freedesktop.Notifications via `notify-send`).
-//! The panel is the main UI; these only make sure a waiting request or a
-//! needed unlock isn't missed while it is closed.
+//! Desktop notifications. The panel and approval dialog are the main UI; these
+//! make sure a waiting request isn't missed while you're elsewhere. On Omarchy
+//! they go through `omarchy-notification-send` (clicking opens the approval
+//! dialog); elsewhere through `notify-send`.
 
 use std::sync::Arc;
 
@@ -8,36 +9,58 @@ use opal_signer::Prompt;
 
 use crate::app::App;
 
-pub async fn prompt_opened(app: &Arc<App>, prompt: &Prompt) {
-    let what = match (&prompt.request.method, &prompt.kind_label) {
-        (_, Some(label)) => format!("wants to sign: {label}"),
-        (m, None) => format!("wants to use {m}"),
+const GLYPH: &str = "󰇈";
+
+pub async fn prompt_opened(_app: &Arc<App>, prompt: &Prompt) {
+    let what = match &prompt.kind_label {
+        Some(label) => format!("wants to sign: {label}"),
+        None => format!("wants to use {}", prompt.request.method),
     };
-    send(app, &format!("{} {what}", prompt.request.app_name)).await;
+    send(&prompt.request.app_name, &what).await;
 }
 
-pub async fn unlock_needed(app: &Arc<App>, app_name: &str, method: &str) {
+pub async fn unlock_needed(_app: &Arc<App>, app_name: &str, method: &str) {
     send(
-        app,
-        &format!("{app_name} is waiting ({method}). Unlock Opal to continue."),
+        app_name,
+        &format!("is waiting ({method}). Unlock Opal to continue."),
     )
     .await;
 }
 
-async fn send(app: &Arc<App>, body: &str) {
-    let _ = app;
-    let result = tokio::process::Command::new("notify-send")
-        .args([
-            "--app-name=Opal",
-            "--icon=dialog-password",
-            "--urgency=normal",
-            "--expire-time=15000",
-            "Nostr signer",
+async fn send(headline: &str, body: &str) {
+    let omarchy = which("omarchy-notification-send");
+    let mut cmd = if omarchy {
+        let mut c = tokio::process::Command::new("omarchy-notification-send");
+        c.args([
+            "--app-name",
+            "Opal",
+            "-g",
+            GLYPH,
+            "-t",
+            "15000",
+            headline,
             body,
-        ])
-        .status()
-        .await;
-    if let Err(e) = result {
-        tracing::debug!("notify-send failed: {e}");
+        ]);
+        c.args(["--exec", "omarchy-shell", "opal", "approvals"]);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("notify-send");
+        c.args(["--app-name=Opal", "--expire-time=15000", headline, body]);
+        c
+    };
+    // Don't wait: omarchy-notification-send blocks until the notification is
+    // clicked or closed when --exec is used.
+    match cmd.kill_on_drop(false).spawn() {
+        Ok(mut child) => {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+        Err(e) => tracing::debug!("sending a notification failed: {e}"),
     }
+}
+
+fn which(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
 }

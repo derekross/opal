@@ -119,11 +119,21 @@ impl App {
     pub async fn status(&self) -> Value {
         let cfg = self.config.read().await;
         let current = self.accounts.current().ok().flatten();
+        // Only accounts whose key is actually in the keyring.
+        let in_keyring: Vec<String> = self
+            .vault
+            .accounts()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|pk| pk.to_hex())
+            .collect();
         let accounts: Vec<Value> = self
             .accounts
             .list()
             .unwrap_or_default()
             .into_iter()
+            .filter(|a| in_keyring.contains(&a.pubkey))
             .map(|a| {
                 let npub = PublicKey::from_hex(&a.pubkey)
                     .ok()

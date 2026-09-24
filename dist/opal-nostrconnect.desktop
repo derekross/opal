@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Opal Nostr Connect
+Comment=Approve a nostrconnect:// login with Opal
+Exec=@BINDIR@/opal connect %u
+Icon=dialog-password
+NoDisplay=true
+Terminal=false
+MimeType=x-scheme-handler/nostrconnect;

@@ -21,6 +21,28 @@ icon, and features you switch on as you need them.
   do not learn your npub until they ask for it, and a leaked `bunker://` URI
   cannot be reused.
 
+## Install
+
+```sh
+./dist/install.sh
+```
+
+This builds `opald` and `opal`, installs them to `~/.local/bin`, enables the
+`opal.service` systemd user unit, registers the `nostrconnect://` link
+handler, and adds the Opal gem to the Omarchy bar. Click it to import or
+create your key.
+
+Useful commands:
+
+```sh
+opal status                  # lock state, accounts, modules
+opal bunker --qr             # a single-use bunker:// login for an app
+opal connect 'nostrconnect://…'
+opal prompts / opal approve <id> --remember 1h
+omarchy-shell opal panel     # toggle the panel (bind it to a key)
+omarchy-shell opal lock
+```
+
 ## Layout
 
 ```
@@ -28,6 +50,8 @@ crates/opal-core     config, key import, keyring store, vault
 crates/opal-signer   NIP-46 signer (protocol, URIs, permissions, request loop)
 crates/opald         daemon (systemd user service)
 crates/opal-cli      `opal` command
+shell-plugin         Omarchy shell plugin (bar gem, panel, approval dialog)
+dist                 systemd unit, link handler, install script
 tests/interop        nostr-tools BunkerSigner against our signer
 ```
 
@@ -37,7 +61,11 @@ tests/interop        nostr-tools BunkerSigner against our signer
 cargo test                                             # unit + end-to-end tests
 cargo test -p opal-core --test keyring -- --ignored    # real Secret Service
 (cd tests/interop && npm install && npm test)          # nostr-tools interop
+./dist/dev-plugin.sh                                   # sync the shell plugin and reload it
 ```
+
+The plugin's service is `keepLoaded`, so changes to `OpalService.qml` need
+`omarchy-restart-shell`.
 
 ## License
 

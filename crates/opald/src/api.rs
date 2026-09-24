@@ -343,6 +343,24 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({"online": p.online}))
         }
 
+        "qr.svg" => {
+            // Render a QR code (e.g. a bunker URI) to a private file the panel
+            // can show. The URI's secret is single-use, so the file is too.
+            #[derive(Deserialize)]
+            struct P {
+                data: String,
+            }
+            let p: P = parse(params)?;
+            let code = qrcode::QrCode::new(p.data.as_bytes())?;
+            let svg = code
+                .render::<qrcode::render::svg::Color>()
+                .min_dimensions(256, 256)
+                .quiet_zone(true)
+                .build();
+            let path = opal_core::paths::socket_path().with_file_name("opal-qr.svg");
+            write_private(&path, svg.as_bytes())?;
+            Ok(json!({"path": path}))
+        }
         "kinds.label" => {
             #[derive(Deserialize)]
             struct P {
@@ -396,6 +414,21 @@ async fn accounts_add(app: &Arc<App>, params: Value) -> Result<Value> {
     let app2 = app.clone();
     tokio::spawn(async move { profiles::refresh(&app2, &[pk]).await });
     Ok(json!({"pubkey": pk.to_hex(), "npub": pk.to_bech32()?}))
+}
+
+fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(data)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
 }
 
 fn check_passphrase_strength(p: &str) -> Result<()> {
