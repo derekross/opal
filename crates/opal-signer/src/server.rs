@@ -14,19 +14,27 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::approver::{ApprovalRequest, Approver, Decision};
 use crate::connection::{ConnStore, Connection, ConnectionInfo};
+use crate::permissions::{Rule, Source};
 use crate::perms::parse_perms;
 use crate::protocol::{Method, Request, Response, Transport};
+use crate::store::{ActivityEntry, SignerStore, hash_secret};
 use crate::uri::{NostrConnectUri, bunker_uri};
 
 /// Requests older or newer than this are ignored (replays, broken clocks).
 const MAX_CLOCK_SKEW_SECS: u64 = 300;
 const SEEN_CAPACITY: usize = 10_000;
+/// How long to wait for relays to connect before carrying on anyway.
+const RELAY_CONNECT_WAIT: Duration = Duration::from_secs(5);
+/// Activity older than this is pruned.
+const ACTIVITY_RETENTION_SECS: u64 = 90 * 86_400;
 
 #[derive(Debug, Clone)]
 pub struct SignerSettings {
     pub default_relays: Vec<RelayUrl>,
     /// How long a request may wait for an unlock or a decision.
     pub pending_timeout: Duration,
+    /// Record requests in the activity log (off = privacy mode).
+    pub log_activity: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +45,8 @@ pub enum SignerError {
     Client(String),
     #[error("unknown account")]
     UnknownAccount,
+    #[error("unknown app")]
+    UnknownApp,
 }
 
 /// Things the UI wants to hear about.
@@ -46,11 +56,15 @@ pub enum SignerEvent {
     Connected {
         connection: ConnectionInfo,
     },
+    Updated {
+        connection: ConnectionInfo,
+    },
     Disconnected {
         connection_id: String,
     },
     UnlockNeeded {
         connection_id: String,
+        app_name: String,
         method: Method,
     },
     Request {
@@ -59,6 +73,7 @@ pub enum SignerEvent {
         method: Method,
         kind: Option<u16>,
         allowed: bool,
+        source: Source,
         reason: Option<String>,
         at: u64,
     },
@@ -73,6 +88,7 @@ struct Inner {
     client: Client,
     vault: Arc<Vault>,
     conns: ConnStore,
+    store: Option<SignerStore>,
     approver: Arc<dyn Approver>,
     settings: SignerSettings,
     seen: Mutex<Seen>,
@@ -124,13 +140,36 @@ struct ClientMetadata {
 type Reply = Result<String, String>;
 
 impl Signer {
+    /// A signer that keeps connections in memory only (tests, dev tools).
     pub fn new(vault: Arc<Vault>, approver: Arc<dyn Approver>, settings: SignerSettings) -> Self {
+        Self::build(vault, approver, settings, ConnStore::memory(), None)
+    }
+
+    /// A signer that saves apps, rules and activity in `store`.
+    pub async fn with_store(
+        vault: Arc<Vault>,
+        approver: Arc<dyn Approver>,
+        settings: SignerSettings,
+        store: SignerStore,
+    ) -> Result<Self, SignerError> {
+        let conns = ConnStore::load(store.clone(), vault.clone()).await?;
+        Ok(Self::build(vault, approver, settings, conns, Some(store)))
+    }
+
+    fn build(
+        vault: Arc<Vault>,
+        approver: Arc<dyn Approver>,
+        settings: SignerSettings,
+        conns: ConnStore,
+        store: Option<SignerStore>,
+    ) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(Inner {
                 client: Client::default(),
                 vault,
-                conns: ConnStore::default(),
+                conns,
+                store,
                 approver,
                 settings,
                 seen: Mutex::new(Seen::default()),
@@ -144,11 +183,21 @@ impl Signer {
         self.inner.events.subscribe()
     }
 
+    pub fn store(&self) -> Option<&SignerStore> {
+        self.inner.store.as_ref()
+    }
+
     /// Connect to relays and start answering requests.
     pub async fn start(&self) -> Result<tokio::task::JoinHandle<()>, SignerError> {
         let inner = self.inner.clone();
         let mut notifications = inner.client.notifications();
-        inner.ensure_relays(&inner.settings.default_relays).await?;
+        let mut relays = inner.settings.default_relays.clone();
+        for r in inner.conns.relays().await {
+            if !relays.contains(&r) {
+                relays.push(r);
+            }
+        }
+        inner.ensure_relays(&relays).await?;
         inner.resubscribe().await?;
         Ok(tokio::spawn(async move {
             while let Some(n) = notifications.next().await {
@@ -164,6 +213,18 @@ impl Signer {
         }))
     }
 
+    /// Disconnect from all relays (kill switch) or reconnect.
+    pub async fn set_online(&self, online: bool) {
+        if online {
+            self.inner.client.connect().await;
+            if let Err(e) = self.inner.resubscribe().await {
+                tracing::warn!("resubscribing failed: {e}");
+            }
+        } else {
+            self.inner.client.disconnect().await;
+        }
+    }
+
     pub async fn shutdown(&self) {
         self.inner.client.shutdown().await;
     }
@@ -176,6 +237,10 @@ impl Signer {
             .iter()
             .map(Connection::info)
             .collect()
+    }
+
+    pub async fn connection(&self, id: &str) -> Option<ConnectionInfo> {
+        self.inner.conns.get(id).await.map(|c| c.info())
     }
 
     /// Signer-initiated flow: returns the new connection and its `bunker://` URI.
@@ -199,8 +264,8 @@ impl Signer {
             account,
             transport: Keys::generate(),
             client: None,
-            secret: Some(secret.clone()),
-            name,
+            secret_hash: Some(hash_secret(&secret)),
+            name: name.filter(|n| !n.trim().is_empty()),
             url: None,
             image: None,
             relays: relays.clone(),
@@ -213,38 +278,53 @@ impl Signer {
         let uri = bunker_uri(&conn.transport.public_key(), &relays, Some(&secret));
         let info = conn.info();
         inner.ensure_relays(&relays).await?;
-        inner.conns.insert(conn).await;
+        inner.conns.insert(conn).await?;
         inner.resubscribe().await?;
         Ok((info, uri))
     }
 
     /// Client-initiated flow: accept a `nostrconnect://` URI the user approved.
+    /// `grant` lists `(method, kind)` pairs to allow from now on.
     pub async fn accept_nostrconnect(
         &self,
         uri: &NostrConnectUri,
         account: PublicKey,
         policy: Policy,
+        grant: &[(Method, Option<u16>)],
     ) -> Result<ConnectionInfo, SignerError> {
         let inner = &self.inner;
         inner.check_account(&account).await?;
+        let now = Timestamp::now();
         let conn = Connection {
             id: random_hex(16),
             account,
             transport: Keys::generate(),
             client: Some(uri.client),
-            secret: None,
+            secret_hash: None,
             name: uri.name.clone(),
             url: uri.url.clone(),
             image: uri.image.clone(),
             relays: uri.relays.clone(),
             policy,
             requested_perms: uri.perms.clone(),
-            created_at: Timestamp::now(),
-            last_used: Some(Timestamp::now()),
+            created_at: now,
+            last_used: Some(now),
             expires_unused_at: None,
         };
         inner.ensure_relays(&conn.relays).await?;
-        inner.conns.insert(conn.clone()).await;
+        inner.conns.insert(conn.clone()).await?;
+        if let Some(store) = &inner.store {
+            for (method, kind) in grant {
+                store.put_rule(&Rule {
+                    app_id: conn.id.clone(),
+                    method: method.clone(),
+                    kind: *kind,
+                    allow: true,
+                    until: None,
+                    created_at: now.as_secs(),
+                })?;
+            }
+        }
         inner.resubscribe().await?;
         // The client learns our key from the author of this response and
         // checks the echoed secret.
@@ -269,6 +349,56 @@ impl Signer {
         }
         Ok(removed)
     }
+
+    /// Change an app's name, policy or relays.
+    pub async fn update_connection(
+        &self,
+        id: &str,
+        name: Option<String>,
+        policy: Option<Policy>,
+        relays: Option<Vec<RelayUrl>>,
+    ) -> Result<ConnectionInfo, SignerError> {
+        if let Some(r) = &relays {
+            self.inner.ensure_relays(r).await?;
+        }
+        let updated = self
+            .inner
+            .conns
+            .update(id, |c| {
+                if let Some(n) = name {
+                    c.name = Some(n).filter(|n| !n.trim().is_empty());
+                }
+                if let Some(p) = policy {
+                    c.policy = p;
+                }
+                if let Some(r) = relays.filter(|r| !r.is_empty()) {
+                    c.relays = r;
+                }
+            })
+            .await
+            .ok_or(SignerError::UnknownApp)?;
+        let info = updated.info();
+        self.inner.emit(SignerEvent::Updated {
+            connection: info.clone(),
+        });
+        Ok(info)
+    }
+
+    /// Housekeeping: drop unused expired bunker URIs, old request ids and
+    /// old activity. Call periodically.
+    pub async fn prune(&self) -> Result<(), SignerError> {
+        let now = Timestamp::now();
+        for c in self.inner.conns.all().await {
+            if c.client.is_none() && c.expires_unused_at.is_some_and(|t| t <= now) {
+                self.remove_connection(&c.id).await?;
+            }
+        }
+        if let Some(store) = &self.inner.store {
+            store.prune_seen(now.as_secs().saturating_sub(2 * MAX_CLOCK_SKEW_SECS))?;
+            store.prune_activity(now.as_secs().saturating_sub(ACTIVITY_RETENTION_SECS))?;
+        }
+        Ok(())
+    }
 }
 
 impl Inner {
@@ -291,7 +421,9 @@ impl Inner {
                 .await
                 .map_err(|e| SignerError::Client(e.to_string()))?;
         }
-        self.client.connect().await;
+        // Requests are ephemeral: relays don't keep them for late subscribers,
+        // so don't report ready before we are actually listening.
+        self.client.connect().and_wait(RELAY_CONNECT_WAIT).await;
         Ok(())
     }
 
@@ -314,6 +446,19 @@ impl Inner {
         Ok(())
     }
 
+    /// `false` if this request was handled before (also across restarts).
+    async fn first_time(&self, event: &Event) -> bool {
+        if !self.seen.lock().await.insert(event.id) {
+            return false;
+        }
+        match &self.store {
+            Some(store) => store
+                .mark_seen(&event.id.to_hex(), event.created_at.as_secs())
+                .unwrap_or(true),
+            None => true,
+        }
+    }
+
     async fn handle_event(&self, event: Event, relay: RelayUrl) {
         if event.verify().is_err() {
             return;
@@ -323,7 +468,7 @@ impl Inner {
             tracing::debug!(id = %event.id, "dropping stale request");
             return;
         }
-        if !self.seen.lock().await.insert(event.id) {
+        if !self.first_time(&event).await {
             return;
         }
         let mut conn = None;
@@ -370,10 +515,9 @@ impl Inner {
         if conn.client.as_ref() != Some(client) {
             return Err("unauthorized: connect first".into());
         }
-        let transport_pk = conn.transport.public_key();
         let conn = self
             .conns
-            .update(&transport_pk, |c| c.last_used = Some(Timestamp::now()))
+            .update(&conn.id, |c| c.last_used = Some(Timestamp::now()))
             .await
             .ok_or("connection removed")?;
 
@@ -403,22 +547,19 @@ impl Inner {
             return Err("already connected".into());
         }
         // Unclaimed bunker connection: the single-use secret must match.
-        let given = req.param(1).unwrap_or_default();
-        match &conn.secret {
-            Some(secret) if !given.is_empty() && secret == given => {}
-            _ => return Err("invalid secret".into()),
+        if !conn.secret_matches(req.param(1).unwrap_or_default()) {
+            return Err("invalid secret".into());
         }
         let meta: ClientMetadata = req
             .param(3)
             .and_then(|m| serde_json::from_str(m).ok())
             .unwrap_or_default();
         let perms = parse_perms(req.param(2).unwrap_or_default());
-        let transport_pk = conn.transport.public_key();
         let updated = self
             .conns
-            .update(&transport_pk, |c| {
+            .update(&conn.id, |c| {
                 c.client = Some(*client);
-                c.secret = None;
+                c.secret_hash = None;
                 c.expires_unused_at = None;
                 c.last_used = Some(Timestamp::now());
                 c.requested_perms = perms;
@@ -441,7 +582,10 @@ impl Inner {
         let mut approval = ApprovalRequest {
             connection_id: conn.id.clone(),
             app_name: conn.display_name(),
+            app_url: conn.url.clone(),
+            app_image: conn.image.clone(),
             account: conn.account,
+            policy: conn.policy,
             method: req.method.clone(),
             kind: None,
             event: None,
@@ -493,58 +637,91 @@ impl Inner {
         if !self.vault.is_unlocked() {
             self.emit(SignerEvent::UnlockNeeded {
                 connection_id: conn.id.clone(),
+                app_name: conn.display_name(),
                 method: req.method.clone(),
             });
             if self.vault.wait_unlocked(timeout).await.is_err() {
-                return self.finish(&approval, Err("signer is locked".into()));
+                return self.finish(&approval, Source::Locked, Err("signer is locked".into()));
             }
         }
 
         let decision = tokio::time::timeout(timeout, self.approver.decide(&approval))
             .await
-            .unwrap_or_else(|_| Decision::Deny("timed out waiting for approval".into()));
-        if let Decision::Deny(reason) = decision {
-            return self.finish(&approval, Err(reason));
-        }
+            .unwrap_or_else(|_| {
+                Decision::Deny(Source::Timeout, "timed out waiting for approval".into())
+            });
+        let source = match decision {
+            Decision::Allow(s) => s,
+            Decision::Deny(s, reason) => return self.finish(&approval, s, Err(reason)),
+        };
 
         let keys = match self.vault.keys(&conn.account).await {
             Ok(k) => k,
-            Err(e) => return self.finish(&approval, Err(e.to_string())),
+            Err(e) => return self.finish(&approval, Source::Error, Err(e.to_string())),
         };
         let sk = keys.secret_key();
-        let result = match req.method {
+        let cp = approval.counterparty;
+        let result: Reply = match req.method {
             Method::GetPublicKey => Ok(conn.account.to_hex()),
             Method::SignEvent => keys
                 .sign_event(unsigned.expect("parsed above"))
                 .map(|e| e.as_json())
                 .map_err(|e| e.to_string()),
-            Method::Nip04Encrypt => nip04::encrypt(sk, &approval.counterparty.unwrap(), &payload)
-                .map_err(|e| e.to_string()),
-            Method::Nip04Decrypt => nip04::decrypt(sk, &approval.counterparty.unwrap(), &payload)
-                .map_err(|e| e.to_string()),
-            Method::Nip44Encrypt => nip44::encrypt(
-                sk,
-                &approval.counterparty.unwrap(),
-                &payload,
-                nip44::Version::V2,
-            )
-            .map_err(|e| e.to_string()),
-            Method::Nip44Decrypt => nip44::decrypt(sk, &approval.counterparty.unwrap(), &payload)
-                .map_err(|e| e.to_string()),
+            Method::Nip04Encrypt => {
+                nip04::encrypt(sk, &cp.expect("parsed"), &payload).map_err(|e| e.to_string())
+            }
+            Method::Nip04Decrypt => {
+                nip04::decrypt(sk, &cp.expect("parsed"), &payload).map_err(|e| e.to_string())
+            }
+            Method::Nip44Encrypt => {
+                nip44::encrypt(sk, &cp.expect("parsed"), &payload, nip44::Version::V2)
+                    .map_err(|e| e.to_string())
+            }
+            Method::Nip44Decrypt => {
+                nip44::decrypt(sk, &cp.expect("parsed"), &payload).map_err(|e| e.to_string())
+            }
             _ => unreachable!(),
         };
-        self.finish(&approval, result)
+        let source = if result.is_ok() {
+            source
+        } else {
+            Source::Error
+        };
+        self.finish(&approval, source, result)
     }
 
-    fn finish(&self, approval: &ApprovalRequest, result: Reply) -> Reply {
+    fn finish(&self, approval: &ApprovalRequest, source: Source, result: Reply) -> Reply {
+        let at = Timestamp::now().as_secs();
+        let reason = result.as_ref().err().cloned();
+        if self.settings.log_activity
+            && let Some(store) = &self.store
+        {
+            let entry = ActivityEntry {
+                id: 0,
+                at,
+                app_id: approval.connection_id.clone(),
+                app_name: approval.app_name.clone(),
+                account: approval.account.to_hex(),
+                method: approval.method.clone(),
+                kind: approval.kind,
+                kind_label: None,
+                allowed: result.is_ok(),
+                source,
+                reason: reason.clone(),
+            };
+            if let Err(e) = store.log_activity(&entry) {
+                tracing::warn!("activity log failed: {e}");
+            }
+        }
         self.emit(SignerEvent::Request {
             connection_id: approval.connection_id.clone(),
             app_name: approval.app_name.clone(),
             method: approval.method.clone(),
             kind: approval.kind,
             allowed: result.is_ok(),
-            reason: result.as_ref().err().cloned(),
-            at: Timestamp::now().as_secs(),
+            source,
+            reason,
+            at,
         });
         result
     }
@@ -592,7 +769,7 @@ impl Inner {
     }
 }
 
-fn random_hex(bytes: usize) -> String {
+pub(crate) fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::fill(&mut buf[..]);
     hex::encode(buf)

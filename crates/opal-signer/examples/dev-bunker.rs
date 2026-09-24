@@ -27,6 +27,7 @@ async fn main() {
         SignerSettings {
             default_relays: vec![relay_url.clone()],
             pending_timeout: Duration::from_secs(30),
+            log_activity: false,
         },
     );
     signer.start().await.unwrap();
@@ -54,7 +55,7 @@ async fn main() {
             line = lines.next_line() => match line {
                 Ok(Some(l)) if l.starts_with("nostrconnect://") => {
                     let parsed = opal_signer::NostrConnectUri::parse(&l).expect("valid nostrconnect uri");
-                    signer.accept_nostrconnect(&parsed, account, Policy::FullTrust).await.unwrap();
+                    signer.accept_nostrconnect(&parsed, account, Policy::FullTrust, &[]).await.unwrap();
                     println!("{}", serde_json::json!({"accepted": parsed.name}));
                 }
                 Ok(Some(_)) => {}

@@ -37,6 +37,7 @@ async fn setup(approver: Arc<dyn Approver>, unlocked: bool, pending: Duration) -
         SignerSettings {
             default_relays: vec![relay_url.clone()],
             pending_timeout: pending,
+            log_activity: false,
         },
     );
     signer.start().await.unwrap();
@@ -189,7 +190,7 @@ async fn nostrconnect_flow() {
     let ours = NostrConnectUri::parse(&uri).unwrap();
     let info = s
         .signer
-        .accept_nostrconnect(&ours, s.account, Policy::Basic)
+        .accept_nostrconnect(&ours, s.account, Policy::Basic, &[])
         .await
         .unwrap();
     assert_eq!(info.name.as_deref(), Some("Test App"));

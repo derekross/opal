@@ -1,17 +1,26 @@
 //! Deciding whether a request may go ahead.
 
+use std::sync::Arc;
+
 use futures::future::BoxFuture;
-use nostr_sdk::prelude::{PublicKey, UnsignedEvent};
+use nostr_sdk::prelude::{PublicKey, Timestamp, UnsignedEvent};
+use opal_core::config::Policy;
 use serde::Serialize;
 
+use crate::permissions::{Evaluation, Rule, Source, evaluate};
+use crate::prompts::PromptHub;
 use crate::protocol::Method;
+use crate::store::SignerStore;
 
 /// Everything the user (or a rule) needs to decide on a request.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApprovalRequest {
     pub connection_id: String,
     pub app_name: String,
+    pub app_url: Option<String>,
+    pub app_image: Option<String>,
     pub account: PublicKey,
+    pub policy: Policy,
     pub method: Method,
     /// Kind of the event to sign, for `sign_event`.
     pub kind: Option<u16>,
@@ -25,20 +34,20 @@ pub struct ApprovalRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    Allow,
-    Deny(String),
+    Allow(Source),
+    Deny(Source, String),
 }
 
 pub trait Approver: Send + Sync {
     fn decide<'a>(&'a self, req: &'a ApprovalRequest) -> BoxFuture<'a, Decision>;
 }
 
-/// Approves everything. Only for tests and `--auto-approve` debugging.
+/// Approves everything. Only for tests and debugging.
 pub struct AllowAll;
 
 impl Approver for AllowAll {
     fn decide<'a>(&'a self, _req: &'a ApprovalRequest) -> BoxFuture<'a, Decision> {
-        Box::pin(async { Decision::Allow })
+        Box::pin(async { Decision::Allow(Source::Automatic) })
     }
 }
 
@@ -47,6 +56,57 @@ pub struct DenyAll;
 
 impl Approver for DenyAll {
     fn decide<'a>(&'a self, _req: &'a ApprovalRequest) -> BoxFuture<'a, Decision> {
-        Box::pin(async { Decision::Deny("user rejected".into()) })
+        Box::pin(async { Decision::Deny(Source::Automatic, "user rejected".into()) })
+    }
+}
+
+/// The real approver: saved rules and the app's policy first, then a prompt.
+/// Answers the user asks to remember become rules.
+pub struct PolicyApprover {
+    store: SignerStore,
+    prompts: Arc<PromptHub>,
+}
+
+impl PolicyApprover {
+    pub fn new(store: SignerStore, prompts: Arc<PromptHub>) -> Self {
+        Self { store, prompts }
+    }
+}
+
+impl Approver for PolicyApprover {
+    fn decide<'a>(&'a self, req: &'a ApprovalRequest) -> BoxFuture<'a, Decision> {
+        Box::pin(async move {
+            let now = Timestamp::now().as_secs();
+            let rules = match self.store.rules(&req.connection_id) {
+                Ok(r) => r,
+                Err(e) => return Decision::Deny(Source::Error, e.to_string()),
+            };
+            match evaluate(req.policy, &rules, &req.method, req.kind, now) {
+                Evaluation::Allow(s) => return Decision::Allow(s),
+                Evaluation::Deny(s) => return Decision::Deny(s, "denied by a saved rule".into()),
+                Evaluation::Ask => {}
+            }
+            let Some(answer) = self.prompts.ask(req.clone()).await else {
+                return Decision::Deny(Source::Timeout, "no answer".into());
+            };
+            if let Some(until) = answer.remember.until(now) {
+                let rule = Rule {
+                    app_id: req.connection_id.clone(),
+                    method: req.method.clone(),
+                    kind: req.kind,
+                    allow: answer.allow,
+                    until,
+                    created_at: now,
+                };
+                if let Err(e) = self.store.put_rule(&rule) {
+                    tracing::warn!("saving rule failed: {e}");
+                }
+            }
+            if answer.allow {
+                Decision::Allow(Source::User)
+            } else {
+                Decision::Deny(Source::User, "user rejected".into())
+            }
+        })
     }
 }

@@ -20,6 +20,8 @@ pub enum Error {
     Keyring(Box<oo7::Error>),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("database: {0}")]
+    Db(String),
     #[error("config: {0}")]
     Config(String),
 }

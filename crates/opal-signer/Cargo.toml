@@ -9,8 +9,10 @@ hex = "0.4.3"
 nostr-sdk = "0.45"
 opal-core = { version = "0.1.0", path = "../opal-core" }
 rand = "0.10.3"
+rusqlite = "0.40.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.11.0"
 thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
@@ -19,4 +21,4 @@ url = "2.5.8"
 [dev-dependencies]
 nostr-connect = "0.45"
 nostr-sdk = { version = "0.45", features = ["local-relay"] }
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

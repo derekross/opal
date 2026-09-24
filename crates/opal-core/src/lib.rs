@@ -2,6 +2,7 @@
 //! unlockable vault that holds account keys in memory.
 
 pub mod config;
+pub mod db;
 pub mod error;
 pub mod import;
 pub mod keystore;
