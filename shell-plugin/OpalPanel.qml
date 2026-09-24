@@ -54,12 +54,24 @@ Item {
     onTriggered: root.toast = ""
   }
 
-  readonly property var tabs: [
-    { value: "apps", label: "Apps" },
-    { value: "activity", label: "Activity" },
-    { value: "profiles", label: "Profiles" },
-    { value: "settings", label: "Settings" }
-  ]
+  property bool panelOpen: false
+  readonly property bool notificationsOn: up && svc.notificationsOn
+  readonly property var tabs: {
+    var t = []
+    if (notificationsOn) t.push({ value: "notifications", label: svc.unread > 0 ? "Inbox " + svc.unread : "Inbox" })
+    if (up && svc.hasAccounts) {
+      t.push({ value: "apps", label: "Apps" })
+      t.push({ value: "activity", label: "Activity" })
+    }
+    t.push({ value: "profiles", label: "Profiles" })
+    t.push({ value: "settings", label: "Settings" })
+    return t
+  }
+  onTabsChanged: {
+    for (var i = 0; i < tabs.length; i++) if (tabs[i].value === tab) return
+    tab = tabs.length > 0 ? tabs[0].value : "apps"
+  }
+  onNotificationsOnChanged: if (notificationsOn && tab === "apps") tab = "notifications"
 
   PanelKeyCatcher {
     id: keyCatcher
@@ -121,7 +133,8 @@ Item {
               text: {
                 if (!root.up) return "Opal"
                 var a = root.svc.currentAccount
-                return a ? a.label : "Opal"
+                if (a) return a.label
+                return root.svc.readOnly ? "Watching" : "Opal"
               }
             }
             Text {
@@ -133,7 +146,7 @@ Item {
               text: {
                 if (!root.up) return "The Opal daemon isn't running"
                 var a = root.svc.currentAccount
-                if (!a) return "Nostr signer"
+                if (!a) return root.svc.readOnly ? U.shortKey(root.svc.identity.npub) + " · read-only" : "Nostr signer"
                 return (root.svc.locked ? "Locked · " : "Unlocked · ") + U.shortKey(a.npub)
               }
               MouseArea {
@@ -196,7 +209,7 @@ Item {
         // ── First run ─────────────────────────────────────────────
         SetupView {
           width: parent.width
-          visible: root.up && !root.svc.hasAccounts
+          visible: root.up && !root.svc.configured
           svc: root.svc
           foreground: root.foreground
         }
@@ -226,13 +239,22 @@ Item {
         // ── Tabs ──────────────────────────────────────────────────
         ButtonGroup {
           width: parent.width
-          visible: root.up && root.svc.hasAccounts
+          visible: root.up && root.svc.configured
           options: root.tabs
           value: root.tab
           foreground: root.foreground
           onChanged: function(v) { root.tab = v }
         }
 
+        NotificationsView {
+          width: parent.width
+          visible: root.up && root.svc.configured && root.tab === "notifications"
+          svc: root.svc
+          foreground: root.foreground
+          urgent: root.urgent
+          panelOpen: root.panelOpen
+          onOpened: root.closeRequested()
+        }
         AppsView {
           width: parent.width
           visible: root.up && root.svc.hasAccounts && root.tab === "apps"
@@ -249,14 +271,14 @@ Item {
         }
         ProfilesView {
           width: parent.width
-          visible: root.up && root.svc.hasAccounts && root.tab === "profiles"
+          visible: root.up && root.svc.configured && root.tab === "profiles"
           svc: root.svc
           foreground: root.foreground
           urgent: root.urgent
         }
         SettingsView {
           width: parent.width
-          visible: root.up && root.svc.hasAccounts && root.tab === "settings"
+          visible: root.up && root.svc.configured && root.tab === "settings"
           svc: root.svc
           foreground: root.foreground
           urgent: root.urgent

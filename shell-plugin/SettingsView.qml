@@ -35,6 +35,30 @@ Column {
     })
   }
 
+  PanelSectionHeader { text: "IDENTITY"; foreground: root.dim }
+  ButtonGroup {
+    width: parent.width
+    options: [
+      { value: "local", label: "My key (signer)", tooltip: "Use the account selected in Profiles" },
+      { value: "read-only", label: "Watch an npub", tooltip: "Notifications only, no key needed" }
+    ]
+    value: (root.cfg.identity && root.cfg.identity.mode === "read-only") ? "read-only" : "local"
+    foreground: root.foreground
+    onChanged: function(v) {
+      if (v === "local") root.set({ identity: { mode: "local" } })
+      else if (npubField.text.trim().indexOf("npub1") === 0) root.set({ identity: { mode: "read-only", npub: npubField.text.trim() } })
+      else npubField.forceActiveFocus()
+    }
+  }
+  TextField {
+    id: npubField
+    width: parent.width
+    placeholderText: "npub to watch"
+    text: root.cfg.identity && root.cfg.identity.npub ? root.cfg.identity.npub : ""
+    foreground: root.foreground
+    onAccepted: if (text.trim().indexOf("npub1") === 0) root.set({ identity: { mode: "read-only", npub: text.trim() } })
+  }
+
   PanelSectionHeader { text: "LOCK AFTER"; foreground: root.dim }
   ButtonGroup {
     width: parent.width
@@ -104,11 +128,72 @@ Column {
   Toggle {
     width: parent.width
     label: "Notifications"
-    description: "Mentions, replies and zaps (coming soon)"
+    description: "Replies, mentions, reactions, zaps and DMs"
     checked: root.modules.notifications === true
     foreground: root.foreground
     onClicked: root.set({ modules: { notifications: !checked } })
   }
+  Column {
+    width: parent.width
+    visible: root.modules.notifications === true
+    spacing: Style.space(8)
+    leftPadding: Style.space(12)
+
+    readonly property var n: root.cfg.notifications || ({})
+    readonly property var types: n.types || ({})
+
+    PanelSectionHeader { text: "SHOW"; foreground: root.dim }
+    Flow {
+      width: parent.width - parent.leftPadding
+      spacing: Style.space(6)
+      Repeater {
+        model: [
+          { key: "replies", label: "Replies" },
+          { key: "mentions", label: "Mentions" },
+          { key: "reposts", label: "Reposts" },
+          { key: "reactions", label: "Reactions" },
+          { key: "zaps", label: "Zaps" },
+          { key: "dms", label: "DMs" }
+        ]
+        delegate: Button {
+          required property var modelData
+          text: modelData.label
+          selected: parent.parent.types[modelData.key] !== false
+          bordered: true
+          foreground: root.foreground
+          onClicked: {
+            var t = {}
+            t[modelData.key] = !selected
+            root.set({ notifications: { types: t } })
+          }
+        }
+      }
+    }
+    PanelSectionHeader { text: "OPEN IN"; foreground: root.dim }
+    ButtonGroup {
+      width: parent.width - parent.leftPadding
+      options: root.svc && root.svc.notifyStatus.clients ? root.svc.notifyStatus.clients : []
+      value: parent.n.client || "primal"
+      foreground: root.foreground
+      onChanged: function(v) { root.set({ notifications: { client: v } }) }
+    }
+    Toggle {
+      width: parent.width - parent.leftPadding
+      label: "Desktop popups"
+      checked: parent.n.desktop !== false
+      foreground: root.foreground
+      onClicked: root.set({ notifications: { desktop: !checked } })
+    }
+    Toggle {
+      width: parent.width - parent.leftPadding
+      label: "Show DM text in popups"
+      description: "Off keeps message text out of notifications and the database"
+      checked: parent.n.dm_previews === true
+      foreground: root.foreground
+      onClicked: root.set({ notifications: { dm_previews: !checked } })
+    }
+  }
+
   Toggle {
     width: parent.width
     label: "Status"

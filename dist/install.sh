@@ -18,7 +18,7 @@ echo "Installing binaries to $BINDIR"
 install -Dm755 target/release/opald "$BINDIR/opald"
 install -Dm755 target/release/opal "$BINDIR/opal"
 
-mkdir -p -m 700 "$HOME/.local/share/opal" "$HOME/.config/opal"
+mkdir -p -m 700 "$HOME/.local/share/opal" "$HOME/.config/opal" "$HOME/.cache/opal"
 
 echo "Installing systemd user service"
 install -Dm644 dist/opal.service "$UNITDIR/opal.service"

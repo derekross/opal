@@ -1,0 +1,21 @@
+[package]
+name = "opal-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+futures = "0.3.34"
+nostr-sdk = "0.45"
+opal-core = { version = "0.1.0", path = "../opal-core" }
+rusqlite = "0.40.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+nostr-sdk = { version = "0.45", features = ["local-relay"] }
+tokio = { version = "1.53.1", features = ["full"] }

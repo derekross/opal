@@ -13,6 +13,7 @@ use opal_core::db::Db;
 use opal_core::ipc::IpcEvent;
 use opal_core::keystore::SecretStore;
 use opal_core::vault::Vault;
+use opal_notify::{NotifyEngine, NotifyStore};
 use opal_signer::{
     NostrConnectUri, PolicyApprover, PromptHub, Signer, SignerSettings, SignerStore,
 };
@@ -31,6 +32,9 @@ pub struct App {
     online: AtomicBool,
     /// `nostrconnect://` URIs handed to us (xdg handler, CLI) awaiting the UI.
     pub offers: Mutex<HashMap<String, NostrConnectUri>>,
+    pub notify_store: NotifyStore,
+    /// The running notifications module and what it was started with.
+    pub notify: Mutex<Option<(NotifyEngine, String)>>,
 }
 
 pub struct Options {
@@ -64,6 +68,7 @@ impl App {
         .await
         .context("loading apps")?;
 
+        let notify_store = NotifyStore::new(db.clone()).context("notification tables")?;
         let (events, _) = broadcast::channel(256);
         Ok(Arc::new(Self {
             config: RwLock::new(config),
@@ -75,6 +80,8 @@ impl App {
             last_activity: Mutex::new(Instant::now()),
             online: AtomicBool::new(true),
             offers: Mutex::new(HashMap::new()),
+            notify_store,
+            notify: Mutex::new(None),
         }))
     }
 
@@ -156,8 +163,21 @@ impl App {
             "identity": cfg.identity,
             "modules": cfg.modules,
             "pending_prompts": self.prompts.pending().len(),
+            "unread_notifications": self.unread_notifications().await,
             "auto_lock_minutes": cfg.signer.auto_lock_minutes,
         })
+    }
+
+    /// Unread count for the account the notifications module is watching.
+    pub async fn unread_notifications(&self) -> u64 {
+        let guard = self.notify.lock().await;
+        match guard.as_ref() {
+            Some((engine, _)) => self
+                .notify_store
+                .unread_count(&engine.account().to_hex())
+                .unwrap_or(0),
+            None => 0,
+        }
     }
 
     pub async fn emit_state(&self) {

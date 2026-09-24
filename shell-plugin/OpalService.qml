@@ -22,6 +22,10 @@ Item {
   property var status: ({})
   readonly property bool locked: status.locked !== false
   readonly property bool hasAccounts: status.has_accounts === true
+  readonly property var identity: status.identity || ({})
+  readonly property bool readOnly: identity.mode === "read-only" && !!identity.npub
+  // Something to show: a local key, or an npub being watched.
+  readonly property bool configured: hasAccounts || readOnly
   readonly property bool online: status.online !== false
   readonly property var accounts: status.accounts || []
   readonly property var currentAccount: {
@@ -30,6 +34,10 @@ Item {
   }
 
   property var apps: []
+  property var notifications: []
+  property var notifyStatus: ({})
+  readonly property int unread: status.unread_notifications || 0
+  readonly property bool notificationsOn: !!status.modules && status.modules.notifications === true
   property var prompts: []
   property var offers: []
   property var activity: []
@@ -76,8 +84,12 @@ Item {
     call("activity.list", { limit: 200 }, function(e, r) { if (!e) root.activity = r || [] })
     call("activity.stats", null, function(e, r) { if (!e) root.stats = r || {} })
   }
+  function refreshNotifications() {
+    call("notifications.list", { limit: 150 }, function(e, r) { if (!e) root.notifications = r || [] })
+    call("notifications.status", null, function(e, r) { if (!e) root.notifyStatus = r || {} })
+  }
   function refreshAll() {
-    refreshApps(); refreshPrompts(); refreshOffers(); refreshActivity(); refreshConfig()
+    refreshApps(); refreshPrompts(); refreshOffers(); refreshActivity(); refreshConfig(); refreshNotifications()
   }
 
   function showApproval() {
@@ -109,6 +121,7 @@ Item {
     case "state":
       status = msg.data || {}
       if (!locked) unlockRequest = null
+      notifyDebounce.restart()
       break
     case "signer":
       var d = msg.data || {}
@@ -125,11 +138,26 @@ Item {
       refreshPrompts()
       if (msg.data && msg.data.type === "opened") showApproval()
       break
+    case "notify":
+      notifyDebounce.restart()
+      break
+    case "unread":
+      var st = Object.assign({}, status)
+      st.unread_notifications = (msg.data && msg.data.count) || 0
+      status = st
+      notifyDebounce.restart()
+      break
     case "nostrconnect_offer":
       refreshOffers()
       showApproval()
       break
     }
+  }
+
+  Timer {
+    id: notifyDebounce
+    interval: 600
+    onTriggered: root.refreshNotifications()
   }
 
   Timer {
@@ -188,6 +216,7 @@ Item {
     target: "opal"
     function panel(): string { root.panelToggleRequested(); return "ok" }
     function tab(name: string): string { root.tabRequested(name); return "ok" }
+    function notifications(): string { root.tabRequested("notifications"); root.panelToggleRequested(); return "ok" }
     function lock(): string { root.call("lock", null); return "ok" }
     function approvals(): string { root.showApproval(); return "ok" }
     function pending(): string { return String(root.attentionCount) }

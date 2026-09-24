@@ -18,6 +18,15 @@ Column {
 
   function submit() {
     error = ""
+    if (mode === "watch") {
+      var npub = watchField.text.trim()
+      if (npub.indexOf("npub1") !== 0) { error = "Paste an npub."; return }
+      svc.call("config.set", { identity: { mode: "read-only", npub: npub }, modules: { notifications: true } }, function(err, r) {
+        if (err) { root.error = err; return }
+        root.svc.config = r
+      })
+      return
+    }
     if (mode === "import" && secret.text.trim() === "") { error = "Paste your key first."; return }
     if (pass1.text.length < 8) { error = "Use a passphrase of at least 8 characters."; return }
     if (pass1.text !== pass2.text) { error = "The passphrases don't match."; return }
@@ -46,12 +55,31 @@ Column {
   ButtonGroup {
     width: parent.width
     options: [
-      { value: "import", label: "Import my key" },
-      { value: "generate", label: "Create a new key" }
+      { value: "import", label: "Import key" },
+      { value: "generate", label: "New key" },
+      { value: "watch", label: "Just watch an npub" }
     ]
     value: root.mode
     foreground: root.foreground
     onChanged: function(v) { root.mode = v }
+  }
+
+  Text {
+    width: parent.width
+    visible: root.mode === "watch"
+    wrapMode: Text.Wrap
+    color: root.dim
+    font.family: Style.font.family
+    font.pixelSize: Style.font.bodySmall
+    text: "Read-only: see notifications for any npub without a key. You can add your key later to sign and read DMs."
+  }
+  TextField {
+    id: watchField
+    width: parent.width
+    visible: root.mode === "watch"
+    placeholderText: "npub1…"
+    foreground: root.foreground
+    onAccepted: root.submit()
   }
 
   TextField {
@@ -73,16 +101,19 @@ Column {
   TextField {
     id: nickname
     width: parent.width
+    visible: root.mode !== "watch"
     placeholderText: "Nickname (optional)"
     foreground: root.foreground
   }
 
   PanelSectionHeader {
+    visible: root.mode !== "watch"
     text: "OPAL PASSPHRASE"
     foreground: root.dim
   }
   TextField {
     id: pass1
+    visible: root.mode !== "watch"
     width: parent.width
     password: true
     placeholderText: "Passphrase (8+ characters)"
@@ -90,6 +121,7 @@ Column {
   }
   TextField {
     id: pass2
+    visible: root.mode !== "watch"
     width: parent.width
     password: true
     placeholderText: "Repeat passphrase"
@@ -108,7 +140,7 @@ Column {
   }
 
   Button {
-    text: root.busy ? "Encrypting…" : (root.mode === "import" ? "Import key" : "Create key")
+    text: root.busy ? "Encrypting…" : root.mode === "import" ? "Import key" : root.mode === "watch" ? "Watch" : "Create key"
     iconText: "󰌆"
     iconSpinning: root.busy
     bordered: true

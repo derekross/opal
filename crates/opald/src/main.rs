@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod ipc;
+mod modules;
 mod notify;
 mod profiles;
 mod tasks;
@@ -70,6 +71,7 @@ async fn main() -> Result<()> {
         }
     });
     tasks::spawn_all(&app);
+    modules::reconcile(&app).await;
 
     let socket = args.socket.unwrap_or_else(paths::socket_path);
     let server = ipc::serve(app.clone(), &socket);

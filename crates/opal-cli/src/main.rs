@@ -88,6 +88,14 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         limit: u32,
     },
+    /// Show recent notifications (replies, mentions, reactions, zaps, DMs).
+    Inbox {
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Mark everything as read afterwards.
+        #[arg(long)]
+        read: bool,
+    },
     /// Turn a module on or off.
     Module {
         name: String,
@@ -321,6 +329,59 @@ async fn run() -> Result<()> {
                 out(&l);
             } else {
                 print_log(&l);
+            }
+        }
+        Cmd::Inbox { limit, read } => {
+            let l = c
+                .call("notifications.list", json!({"limit": limit}))
+                .await?;
+            if cli.json {
+                out(&l);
+            } else {
+                let items = l.as_array().cloned().unwrap_or_default();
+                if items.is_empty() {
+                    println!(
+                        "Nothing yet (is the notifications module on? `opal module notifications on`)"
+                    );
+                }
+                for n in items {
+                    let who = n["author_name"]
+                        .as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| {
+                            n["author"]
+                                .as_str()
+                                .unwrap_or("")
+                                .chars()
+                                .take(10)
+                                .collect()
+                        });
+                    let what = match n["type"].as_str().unwrap_or("") {
+                        "zap" => format!("zapped {} sats", n["sats"].as_u64().unwrap_or(0)),
+                        "reaction" => format!("reacted {}", n["detail"].as_str().unwrap_or("")),
+                        "dm" => "sent a message".into(),
+                        t => t.to_string(),
+                    };
+                    println!(
+                        "{} {:<20} {:<18} {}",
+                        if n["unread"] == json!(true) {
+                            "•"
+                        } else {
+                            " "
+                        },
+                        who.chars().take(20).collect::<String>(),
+                        what,
+                        n["detail"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
+                    );
+                }
+            }
+            if read {
+                c.call("notifications.mark_read", json!(null)).await?;
             }
         }
         Cmd::Module { name, state } => {

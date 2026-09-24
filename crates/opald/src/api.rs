@@ -61,6 +61,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             }
             app.vault.remove_account(&pk).await?;
             app.accounts.remove(&pk)?;
+            crate::modules::reconcile(app).await;
             app.emit_state().await;
             Ok(json!({"ok": true}))
         }
@@ -71,6 +72,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 bail!("unknown account");
             }
             app.accounts.set_current(&pk)?;
+            crate::modules::reconcile(app).await;
             app.emit_state().await;
             Ok(json!({"ok": true}))
         }
@@ -330,6 +332,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let new: Config = serde_json::from_value(current).context("invalid settings")?;
             new.save()?;
             *app.config.write().await = new.clone();
+            crate::modules::reconcile(app).await;
             app.emit_state().await;
             Ok(json!(new))
         }
@@ -361,6 +364,95 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             write_private(&path, svg.as_bytes())?;
             Ok(json!({"path": path}))
         }
+        // ── Notifications ───────────────────────────────────────────────
+        "notifications.status" => {
+            let enabled = app.config.read().await.modules.notifications;
+            let guard = app.notify.lock().await;
+            let status = match guard.as_ref() {
+                Some((engine, _)) => Some(engine.status().await),
+                None => None,
+            };
+            drop(guard);
+            Ok(json!({
+                "enabled": enabled,
+                "running": status.is_some(),
+                "status": status,
+                "unread": app.unread_notifications().await,
+                "clients": opal_notify::links::CLIENTS
+                    .iter()
+                    .map(|(id, label, _)| json!({"value": id, "label": label}))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        "notifications.list" => {
+            #[derive(Deserialize, Default)]
+            struct P {
+                limit: Option<u32>,
+                before: Option<u64>,
+            }
+            let p: P = parse_or_default(params)?;
+            let Some(account) = notify_account(app).await else {
+                return Ok(json!([]));
+            };
+            let client = app.config.read().await.notifications.client.clone();
+            let list = app
+                .notify_store
+                .list(&account, p.limit.unwrap_or(100), p.before)?;
+            Ok(json!(
+                list.into_iter()
+                    .map(|n| {
+                        let url = notification_url(&client, &n);
+                        let mut v = serde_json::to_value(&n).unwrap_or_default();
+                        v["url"] = json!(url);
+                        v
+                    })
+                    .collect::<Vec<_>>()
+            ))
+        }
+        "notifications.mark_read" => {
+            if let Some(account) = notify_account(app).await {
+                app.notify_store
+                    .mark_read(&account, Timestamp::now().as_secs())?;
+            }
+            app.emit("unread", json!({"count": 0}));
+            app.emit_state().await;
+            Ok(json!({"ok": true}))
+        }
+        "notifications.clear" => {
+            if let Some(account) = notify_account(app).await {
+                app.notify_store.clear(&account)?;
+            }
+            app.emit_state().await;
+            Ok(json!({"ok": true}))
+        }
+        "notifications.open" => {
+            let p: Id = parse(params)?;
+            let account = notify_account(app)
+                .await
+                .ok_or(anyhow!("notifications are off"))?;
+            let n = app
+                .notify_store
+                .get(&account, &p.id)?
+                .ok_or(anyhow!("no such notification"))?;
+            let client = app.config.read().await.notifications.client.clone();
+            let url = notification_url(&client, &n).ok_or(anyhow!("nothing to open"))?;
+            tokio::process::Command::new("xdg-open").arg(&url).spawn()?;
+            Ok(json!({"url": url}))
+        }
+        "notifications.block" => {
+            let p: Pk = parse(params)?;
+            let hex = p.pubkey()?.to_hex();
+            {
+                let mut cfg = app.config.write().await;
+                if !cfg.notifications.blocked.contains(&hex) {
+                    cfg.notifications.blocked.push(hex);
+                }
+                cfg.save()?;
+            }
+            crate::modules::reconcile(app).await;
+            Ok(json!({"ok": true}))
+        }
+
         "kinds.label" => {
             #[derive(Deserialize)]
             struct P {
@@ -410,6 +502,7 @@ async fn accounts_add(app: &Arc<App>, params: Value) -> Result<Value> {
         app.vault.unlock(&p.passphrase).await?;
         app.touch().await;
     }
+    crate::modules::reconcile(app).await;
     app.emit_state().await;
     let app2 = app.clone();
     tokio::spawn(async move { profiles::refresh(&app2, &[pk]).await });
@@ -429,6 +522,38 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
     f.write_all(data)?;
     std::fs::rename(tmp, path)?;
     Ok(())
+}
+
+async fn notify_account(app: &App) -> Option<String> {
+    app.notify
+        .lock()
+        .await
+        .as_ref()
+        .map(|(engine, _)| engine.account().to_hex())
+}
+
+/// Where clicking a notification goes: the note itself for replies and
+/// mentions, the note it is about for reactions, reposts and zaps.
+fn notification_url(client: &str, n: &opal_notify::StoredNotification) -> Option<String> {
+    use opal_notify::NotifType;
+    let n2 = &n.n;
+    match (n2.ntype, &n2.ref_id) {
+        (NotifType::Dm, _) => None,
+        (NotifType::Reply | NotifType::Mention, _) | (_, None) => opal_notify::links::event_url(
+            client,
+            &n2.id,
+            Some(&n2.author),
+            Some(n2.kind),
+            n2.relay.as_deref(),
+        ),
+        (_, Some(r)) => opal_notify::links::event_url(
+            client,
+            r,
+            n.ref_author.as_deref(),
+            n.ref_kind,
+            n2.relay.as_deref(),
+        ),
+    }
 }
 
 fn check_passphrase_strength(p: &str) -> Result<()> {

@@ -9,6 +9,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 futures = "0.3.34"
 nostr-sdk = "0.45"
 opal-core = { version = "0.1.0", path = "../opal-core" }
+opal-notify = { version = "0.1.0", path = "../opal-notify" }
 opal-signer = { version = "0.1.0", path = "../opal-signer" }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 serde = { version = "1.0.229", features = ["derive"] }

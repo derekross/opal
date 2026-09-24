@@ -20,12 +20,21 @@ pub const DEFAULT_PROFILE_RELAYS: &[&str] = &[
     "wss://indexer.coracle.social",
 ];
 
+/// Well-connected relays for discovering relay lists and profiles.
+pub const DEFAULT_BOOTSTRAP_RELAYS: &[&str] = &[
+    "wss://purplepag.es",
+    "wss://relay.damus.io",
+    "wss://nos.lol",
+    "wss://relay.primal.net",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub identity: Identity,
     pub modules: Modules,
     pub signer: SignerConfig,
+    pub notifications: NotificationsConfig,
 }
 
 /// Where the rest of Opal gets its identity from.
@@ -112,6 +121,67 @@ impl Default for SignerConfig {
             default_policy: Policy::Basic,
             pending_timeout_secs: 120,
             privacy_mode: false,
+        }
+    }
+}
+
+/// Which kinds of notification to show.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationTypes {
+    pub replies: bool,
+    pub mentions: bool,
+    pub reposts: bool,
+    pub reactions: bool,
+    pub zaps: bool,
+    /// NIP-17 direct messages (need the signer, unlocked).
+    pub dms: bool,
+}
+
+impl Default for NotificationTypes {
+    fn default() -> Self {
+        Self {
+            replies: true,
+            mentions: true,
+            reposts: true,
+            reactions: true,
+            zaps: true,
+            dms: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    pub types: NotificationTypes,
+    /// Web client that opens a notification: primal, jumble, coracle, nostrudel, ditto.
+    pub client: String,
+    /// Pop desktop notifications for new events (the panel always lists them).
+    pub desktop: bool,
+    /// Show message text in desktop notifications for DMs.
+    pub dm_previews: bool,
+    /// Zaps below this many sats don't pop a desktop notification.
+    pub min_zap_sats: u64,
+    /// Extra hex pubkeys to hide, on top of your NIP-51 mute list.
+    pub blocked: Vec<String>,
+    /// Relays used to find your relay list and profiles.
+    pub bootstrap_relays: Vec<String>,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            types: NotificationTypes::default(),
+            client: "primal".into(),
+            desktop: true,
+            dm_previews: false,
+            min_zap_sats: 0,
+            blocked: Vec::new(),
+            bootstrap_relays: DEFAULT_BOOTSTRAP_RELAYS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }

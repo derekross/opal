@@ -65,6 +65,7 @@ Panel {
       if (!root.daemonUp) return "Opal isn't running"
       if (root.attention > 0) return root.attention + " waiting for you"
       if (!root.svc.hasAccounts) return "Opal: set up your Nostr key"
+      if (root.svc.unread > 0) return root.svc.unread + " new on Nostr"
       return root.locked ? "Opal: locked" : "Opal: unlocked"
     }
     onPressed: function(buttonCode) {
@@ -76,6 +77,19 @@ Panel {
         root.toggle()
       }
     }
+  }
+
+  // Unread notifications: a small dot on the gem (approvals turn it red instead).
+  Rectangle {
+    visible: !!root.svc && root.svc.unread > 0 && root.attention === 0
+    width: Style.space(6)
+    height: width
+    radius: width / 2
+    color: Color.accent
+    anchors.right: button.right
+    anchors.top: button.top
+    anchors.rightMargin: Style.space(5)
+    anchors.topMargin: Style.space(4)
   }
 
   KeyboardPanel {
@@ -94,6 +108,7 @@ Panel {
       svc: root.svc
       foreground: root.foreground
       urgent: root.urgent
+      panelOpen: root.opened
       onCloseRequested: root.close()
     }
   }

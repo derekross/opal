@@ -1591,6 +1591,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "opal-notify"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "nostr-sdk",
+ "opal-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "opal-signer"
 version = "0.1.0"
 dependencies = [
@@ -1620,6 +1635,7 @@ dependencies = [
  "futures",
  "nostr-sdk",
  "opal-core",
+ "opal-notify",
  "opal-signer",
  "qrcode",
  "serde",
