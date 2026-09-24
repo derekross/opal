@@ -91,6 +91,22 @@ enum Cmd {
     /// Watch someone's notifications without a key: an npub or a NIP-05
     /// address like derekross@grownostr.org.
     Watch { who: String },
+    /// Set your NIP-38 status: `opal set-status "At the office" --for 4h`.
+    SetStatus {
+        text: String,
+        #[arg(long)]
+        link: Option<String>,
+        /// How long: 30m, 4h, 2d. Default: until cleared.
+        #[arg(long = "for")]
+        duration: Option<String>,
+    },
+    /// Clear the status you set.
+    ClearStatus,
+    /// Show what's playing and recent listens.
+    Plays {
+        #[arg(long, default_value_t = 15)]
+        limit: u32,
+    },
     /// Show recent notifications (replies, mentions, reactions, zaps, DMs).
     Inbox {
         #[arg(long, default_value_t = 20)]
@@ -345,6 +361,52 @@ async fn run() -> Result<()> {
                 r["npub"].as_str().unwrap_or_default()
             );
         }
+        Cmd::SetStatus {
+            text,
+            link,
+            duration,
+        } => {
+            let expires_in = duration.as_deref().map(parse_duration).transpose()?;
+            c.call(
+                "status.set",
+                json!({"text": text, "link": link, "expires_in": expires_in}),
+            )
+            .await?;
+            println!("Status set.");
+        }
+        Cmd::ClearStatus => {
+            c.call("status.clear", json!(null)).await?;
+            println!("Status cleared.");
+        }
+        Cmd::Plays { limit } => {
+            let st = c.call("status.get", json!(null)).await?;
+            if let Some(why) = st["blocked"].as_str() {
+                println!("Status module: {why}");
+            }
+            let np = &st["snapshot"]["now_playing"];
+            if np.is_object() {
+                println!(
+                    "Now playing: {} — {} ({}){}",
+                    np["title"].as_str().unwrap_or(""),
+                    np["artist"].as_str().unwrap_or(""),
+                    np["player"].as_str().unwrap_or(""),
+                    if st["snapshot"]["music"].is_string() {
+                        ", shared"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            let plays = c.call("scrobbles.recent", json!({"limit": limit})).await?;
+            for p in plays.as_array().into_iter().flatten() {
+                println!(
+                    "  {}  {} — {}",
+                    p["played_at"].as_u64().unwrap_or(0),
+                    p["title"].as_str().unwrap_or(""),
+                    p["artist"].as_str().unwrap_or("")
+                );
+            }
+        }
         Cmd::Inbox { limit, read } => {
             let l = c
                 .call("notifications.list", json!({"limit": limit}))
@@ -516,6 +578,20 @@ async fn account(c: &mut Conn, cmd: AccountCmd, raw: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// "30m", "4h", "2d" → seconds.
+fn parse_duration(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = num.parse().context("durations look like 30m, 4h or 2d")?;
+    Ok(match unit {
+        "" | "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => bail!("durations look like 30m, 4h or 2d"),
+    })
 }
 
 /// Read a secret without echo on a terminal, or from stdin when piped.

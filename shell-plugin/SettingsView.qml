@@ -49,20 +49,77 @@ Column {
     })
   }
   readonly property bool watching: !!root.cfg.identity && root.cfg.identity.mode === "read-only"
+  readonly property bool external: !!root.cfg.identity && root.cfg.identity.mode === "external"
+  property string idMode: watching ? "read-only" : external ? "external" : "local"
+  property bool bunkerBusy: false
+  property string bunkerError: ""
+  function connectBunker() {
+    var uri = bunkerField.text.trim()
+    if (uri.indexOf("bunker://") !== 0) { bunkerError = "Paste a bunker:// link from your signer app."; return }
+    bunkerBusy = true
+    bunkerError = ""
+    svc.call("identity.external", { uri: uri }, function(err) {
+      root.bunkerBusy = false
+      if (err) { root.bunkerError = err; return }
+      bunkerField.text = ""
+      root.svc.refreshConfig()
+      root.svc.message("Connected to your external signer", false)
+    })
+  }
 
   ButtonGroup {
     width: parent.width
     options: [
-      { value: "local", label: "My key (signer)", tooltip: "Use the account selected in Profiles" },
+      { value: "local", label: "My key", tooltip: "Use the account selected in Profiles" },
+      { value: "external", label: "External signer", tooltip: "Sign with a bunker such as Amber on your phone" },
       { value: "read-only", label: "Watch someone", tooltip: "Notifications only, no key needed" }
     ]
-    value: root.watching ? "read-only" : "local"
+    value: root.idMode
     foreground: root.foreground
     onChanged: function(v) {
-      if (v === "local") root.set({ identity: { mode: "local" } })
-      else if (watchField.text.trim() !== "") root.watch(watchField.text)
-      else watchField.forceActiveFocus()
+      root.idMode = v
+      if (v === "local") root.svc.run("identity.local", null, function() { root.svc.refreshConfig() })
     }
+  }
+  Text {
+    width: parent.width
+    visible: root.external
+    elide: Text.ElideMiddle
+    color: root.dim
+    font.family: Style.font.family
+    font.pixelSize: Style.font.caption
+    text: root.external ? "Signing through your external signer as " + (root.cfg.identity.npub || "") : ""
+  }
+  Row {
+    width: parent.width
+    visible: root.idMode === "external"
+    spacing: Style.space(8)
+    TextField {
+      id: bunkerField
+      width: parent.width - bunkerButton.width - parent.spacing
+      placeholderText: "bunker://… from Amber or another signer"
+      password: true
+      foreground: root.foreground
+      onAccepted: root.connectBunker()
+    }
+    Button {
+      id: bunkerButton
+      anchors.verticalCenter: bunkerField.verticalCenter
+      text: root.bunkerBusy ? "Approve on your signer…" : "Connect"
+      iconSpinning: root.bunkerBusy
+      bordered: true
+      foreground: root.foreground
+      onClicked: root.connectBunker()
+    }
+  }
+  Text {
+    width: parent.width
+    visible: root.bunkerError !== ""
+    wrapMode: Text.Wrap
+    color: root.urgent
+    font.family: Style.font.family
+    font.pixelSize: Style.font.bodySmall
+    text: root.bunkerError
   }
   Text {
     width: parent.width
@@ -77,6 +134,7 @@ Column {
   }
   Row {
     width: parent.width
+    visible: root.idMode === "read-only"
     spacing: Style.space(8)
     TextField {
       id: watchField
@@ -243,10 +301,125 @@ Column {
   Toggle {
     width: parent.width
     label: "Status"
-    description: "Now playing and status updates (coming soon)"
+    description: "Now playing, your status, and scrobbles (NIP-38)"
     checked: root.modules.status === true
     foreground: root.foreground
     onClicked: root.set({ modules: { status: !checked } })
+  }
+
+  Column {
+    width: parent.width
+    visible: root.modules.status === true
+    spacing: Style.space(8)
+    leftPadding: Style.space(12)
+
+    readonly property var st: root.cfg.status || ({})
+    readonly property real w: width - leftPadding
+
+    Toggle {
+      width: parent.w
+      label: "Share what I'm listening to"
+      description: "Any MPRIS player: Spotify, browsers, mpv…"
+      checked: parent.st.music !== false
+      foreground: root.foreground
+      onClicked: root.set({ status: { music: !checked } })
+    }
+    PanelSectionHeader { text: "SONG LINK"; foreground: root.dim }
+    ButtonGroup {
+      width: parent.w
+      options: [
+        { value: "auto", label: "Auto", tooltip: "The player's own link (e.g. Spotify), else a search" },
+        { value: "youtube-music", label: "YT Music" },
+        { value: "spotify", label: "Spotify" },
+        { value: "none", label: "None" }
+      ]
+      value: parent.st.music_link || "auto"
+      foreground: root.foreground
+      onChanged: function(v) { root.set({ status: { music_link: v } }) }
+    }
+    TextField {
+      width: parent.w
+      placeholderText: "Ignore players (comma separated, e.g. chromium, mpv)"
+      text: (parent.st.players_blocked || []).join(", ")
+      foreground: root.foreground
+      onAccepted: root.set({ status: { players_blocked: text.split(",").map(function(x) { return x.trim() }).filter(function(x) { return x !== "" }) } })
+    }
+    Toggle {
+      width: parent.w
+      label: "Keep a listening history"
+      description: "Stored on this computer (scrobbles)"
+      checked: parent.st.scrobble !== false
+      foreground: root.foreground
+      onClicked: root.set({ status: { scrobble: !checked } })
+    }
+    Toggle {
+      width: parent.w
+      visible: parent.st.scrobble !== false
+      label: "Publish scrobbles"
+      description: "Each play as a public kind 1073 event (draft NIP)"
+      checked: parent.st.publish_scrobbles === true
+      foreground: root.foreground
+      onClicked: root.set({ status: { publish_scrobbles: !checked } })
+    }
+    PanelSectionHeader { text: "AUTOMATIC STATUS"; foreground: root.dim }
+    Toggle {
+      width: parent.w
+      label: "Calendar"
+      description: "\"" + (parent.st.calendar_text || "In a meeting") + "\" during khal events"
+      checked: parent.st.auto_calendar === true
+      foreground: root.foreground
+      onClicked: root.set({ status: { auto_calendar: !checked } })
+    }
+    Toggle {
+      width: parent.w
+      visible: parent.st.auto_calendar === true
+      label: "Show event titles"
+      description: "Off: just \"" + (parent.st.calendar_text || "In a meeting") + "\""
+      checked: parent.st.calendar_titles === true
+      foreground: root.foreground
+      onClicked: root.set({ status: { calendar_titles: !checked } })
+    }
+    Toggle {
+      width: parent.w
+      label: "Away when locked"
+      description: "\"" + (parent.st.away_text || "Away") + "\" while the screen is locked"
+      checked: parent.st.auto_away === true
+      foreground: root.foreground
+      onClicked: root.set({ status: { auto_away: !checked } })
+    }
+    Toggle {
+      width: parent.w
+      label: "Focus with Do Not Disturb"
+      description: "\"" + (parent.st.focus_text || "Focusing") + "\" while notifications are silenced"
+      checked: parent.st.auto_focus === true
+      foreground: root.foreground
+      onClicked: root.set({ status: { auto_focus: !checked } })
+    }
+    Row {
+      width: parent.w
+      spacing: Style.space(6)
+      TextField {
+        width: (parent.width - 2 * parent.spacing) / 3
+        placeholderText: "Meeting text"
+        text: parent.parent.st.calendar_text || ""
+        foreground: root.foreground
+        onAccepted: if (text.trim() !== "") root.set({ status: { calendar_text: text.trim() } })
+      }
+      TextField {
+        width: (parent.width - 2 * parent.spacing) / 3
+        placeholderText: "Away text"
+        text: parent.parent.st.away_text || ""
+        foreground: root.foreground
+        onAccepted: if (text.trim() !== "") root.set({ status: { away_text: text.trim() } })
+      }
+      TextField {
+        width: (parent.width - 2 * parent.spacing) / 3
+        placeholderText: "Focus text"
+        text: parent.parent.st.focus_text || ""
+        foreground: root.foreground
+        onAccepted: if (text.trim() !== "") root.set({ status: { focus_text: text.trim() } })
+      }
+    }
   }
 
   PanelSectionHeader { text: "PASSPHRASE"; foreground: root.dim }

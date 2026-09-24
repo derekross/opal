@@ -35,6 +35,10 @@ Item {
 
   property var apps: []
   property var notifications: []
+  property var statusInfo: ({})
+  property var plays: []
+  property var playStats: ({})
+  readonly property bool statusOn: !!status.modules && status.modules.status === true
   property var notifyStatus: ({})
   readonly property int unread: status.unread_notifications || 0
   readonly property bool notificationsOn: !!status.modules && status.modules.notifications === true
@@ -88,8 +92,13 @@ Item {
     call("notifications.list", { limit: 150 }, function(e, r) { if (!e) root.notifications = r || [] })
     call("notifications.status", null, function(e, r) { if (!e) root.notifyStatus = r || {} })
   }
+  function refreshStatus() {
+    call("status.get", null, function(e, r) { if (!e) root.statusInfo = r || {} })
+    call("scrobbles.recent", { limit: 30 }, function(e, r) { if (!e) root.plays = r || [] })
+    call("scrobbles.stats", null, function(e, r) { if (!e) root.playStats = r || {} })
+  }
   function refreshAll() {
-    refreshApps(); refreshPrompts(); refreshOffers(); refreshActivity(); refreshConfig(); refreshNotifications()
+    refreshApps(); refreshPrompts(); refreshOffers(); refreshActivity(); refreshConfig(); refreshNotifications(); refreshStatus()
   }
 
   function showApproval() {
@@ -122,6 +131,7 @@ Item {
       status = msg.data || {}
       if (!locked) unlockRequest = null
       notifyDebounce.restart()
+      statusDebounce.restart()
       break
     case "signer":
       var d = msg.data || {}
@@ -138,6 +148,9 @@ Item {
       refreshPrompts()
       if (msg.data && msg.data.type === "opened") showApproval()
       break
+    case "status":
+      statusDebounce.restart()
+      break
     case "notify":
       notifyDebounce.restart()
       break
@@ -152,6 +165,12 @@ Item {
       showApproval()
       break
     }
+  }
+
+  Timer {
+    id: statusDebounce
+    interval: 500
+    onTriggered: root.refreshStatus()
   }
 
   Timer {

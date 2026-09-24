@@ -35,6 +35,7 @@ pub struct Config {
     pub modules: Modules,
     pub signer: SignerConfig,
     pub notifications: NotificationsConfig,
+    pub status: StatusConfig,
 }
 
 /// Where the rest of Opal gets its identity from.
@@ -187,6 +188,68 @@ impl Default for NotificationsConfig {
         }
     }
 }
+
+/// NIP-38 statuses and scrobbling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatusConfig {
+    /// Publish what's playing (d=music).
+    pub music: bool,
+    /// Link on music statuses: auto (the player's own link, else a search),
+    /// youtube-music, spotify, or none.
+    pub music_link: String,
+    /// Only these players (MPRIS base names like "spotify", "chromium");
+    /// empty = all.
+    pub players: Vec<String>,
+    /// Never these players.
+    pub players_blocked: Vec<String>,
+    /// Keep a local history of what you listened to.
+    pub scrobble: bool,
+    /// Also publish each play as a kind 1073 scrobble event.
+    pub publish_scrobbles: bool,
+    /// "In a meeting" while a khal event is running.
+    pub auto_calendar: bool,
+    /// Show the event title instead of just "In a meeting".
+    pub calendar_titles: bool,
+    pub calendar_text: String,
+    /// "Away" while the screen is locked.
+    pub auto_away: bool,
+    pub away_text: String,
+    /// "Focusing" while notifications are silenced (Do Not Disturb).
+    pub auto_focus: bool,
+    pub focus_text: String,
+    /// Extra relays to publish to, on top of your NIP-65 write relays.
+    pub relays: Vec<String>,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self {
+            music: true,
+            music_link: "auto".into(),
+            players: Vec::new(),
+            players_blocked: Vec::new(),
+            scrobble: true,
+            publish_scrobbles: false,
+            auto_calendar: false,
+            calendar_titles: false,
+            calendar_text: "In a meeting".into(),
+            auto_away: false,
+            away_text: "Away".into(),
+            auto_focus: false,
+            focus_text: "Focusing".into(),
+            relays: Vec::new(),
+        }
+    }
+}
+
+/// Where statuses go when you have no NIP-65 relay list yet.
+pub const DEFAULT_PUBLISH_RELAYS: &[&str] = &[
+    "wss://relay.ditto.pub",
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.damus.io",
+];
 
 impl Config {
     pub fn load() -> Result<Self> {

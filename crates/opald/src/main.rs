@@ -6,6 +6,7 @@ mod ipc;
 mod modules;
 mod notify;
 mod profiles;
+mod signers;
 mod tasks;
 
 use std::path::PathBuf;
@@ -76,12 +77,18 @@ async fn main() -> Result<()> {
     });
     tasks::spawn_all(&app);
     modules::reconcile(&app).await;
+    modules::connect_bunker_in_background(&app);
 
     let socket = args.socket.unwrap_or_else(paths::socket_path);
     let server = ipc::serve(app.clone(), &socket);
     tokio::select! {
         r = server => r?,
         _ = shutdown_signal() => tracing::info!("shutting down"),
+    }
+    // Don't leave "now playing" up after we're gone (needs the key, so
+    // before locking).
+    if let Some((engine, _)) = app.status.lock().await.take() {
+        engine.stop().await;
     }
     app.vault.lock().await;
     app.signer.shutdown().await;

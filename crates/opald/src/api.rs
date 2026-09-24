@@ -387,6 +387,116 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!(r))
         }
 
+        "identity.external" => {
+            // Sign statuses through a bunker (e.g. Amber). Waits for approval.
+            let p: Uri = parse(params)?;
+            let (bunker, pk) = crate::signers::BunkerSigner::connect(&app.vault, &p.uri).await?;
+            *app.bunker.lock().await = Some(Arc::new(bunker));
+            {
+                let mut cfg = app.config.write().await;
+                cfg.identity.mode = opal_core::config::IdentityMode::External;
+                cfg.identity.bunker_uri = Some(p.uri.trim().to_string());
+                cfg.identity.npub = Some(pk.to_bech32()?);
+                cfg.identity.nip05 = None;
+                cfg.save_to(&app.config_path)?;
+            }
+            crate::modules::reconcile(app).await;
+            app.emit_state().await;
+            Ok(json!({"pubkey": pk.to_hex(), "npub": pk.to_bech32()?}))
+        }
+        "identity.local" => {
+            {
+                let mut cfg = app.config.write().await;
+                cfg.identity.mode = opal_core::config::IdentityMode::Local;
+                cfg.save_to(&app.config_path)?;
+            }
+            *app.bunker.lock().await = None;
+            crate::modules::reconcile(app).await;
+            app.emit_state().await;
+            Ok(json!({"ok": true}))
+        }
+
+        // ── Status & scrobbles ──────────────────────────────────────────
+        "status.get" => {
+            let enabled = app.config.read().await.modules.status;
+            let guard = app.status.lock().await;
+            let (snapshot, account) = match guard.as_ref() {
+                Some((engine, _)) => (
+                    Some(engine.snapshot().await),
+                    Some(engine.account().to_hex()),
+                ),
+                None => (None, None),
+            };
+            drop(guard);
+            Ok(json!({
+                "enabled": enabled,
+                "running": snapshot.is_some(),
+                "blocked": *app.status_blocked.lock().await,
+                "snapshot": snapshot,
+                "manual": app.status_store.manual()?,
+                "account": account,
+            }))
+        }
+        "status.set" => {
+            #[derive(Deserialize)]
+            struct P {
+                text: String,
+                link: Option<String>,
+                /// Seconds from now; omit to keep it until cleared.
+                expires_in: Option<u64>,
+            }
+            let p: P = parse(params)?;
+            if p.text.trim().is_empty() {
+                bail!("write something, or use status.clear");
+            }
+            if let Some(l) = &p.link
+                && !l.is_empty()
+                && !l.starts_with("https://")
+            {
+                bail!("links must start with https://");
+            }
+            let manual = opal_status::general::Manual {
+                text: p.text.chars().take(280).collect(),
+                link: p.link.filter(|l| !l.is_empty()),
+                expires_at: p.expires_in.map(|s| Timestamp::now().as_secs() + s),
+            };
+            set_manual(app, Some(manual)).await
+        }
+        "status.clear" => set_manual(app, None).await,
+        "scrobbles.recent" => {
+            #[derive(Deserialize, Default)]
+            struct P {
+                limit: Option<u32>,
+            }
+            let p: P = parse_or_default(params)?;
+            let Some(account) = status_account(app).await else {
+                return Ok(json!([]));
+            };
+            Ok(json!(
+                app.status_store.recent(&account, p.limit.unwrap_or(50))?
+            ))
+        }
+        "scrobbles.stats" => {
+            let Some(account) = status_account(app).await else {
+                return Ok(json!({}));
+            };
+            let now = Timestamp::now().as_secs();
+            let week = now.saturating_sub(7 * 86_400);
+            let month = now.saturating_sub(30 * 86_400);
+            Ok(json!({
+                "today": app.status_store.play_count(&account, now.saturating_sub(86_400))?,
+                "week": app.status_store.play_count(&account, week)?,
+                "top_week": app.status_store.top_artists(&account, week, 5)?,
+                "top_month": app.status_store.top_artists(&account, month, 10)?,
+            }))
+        }
+        "scrobbles.clear" => {
+            if let Some(account) = status_account(app).await {
+                app.status_store.clear_plays(&account)?;
+            }
+            Ok(json!({"ok": true}))
+        }
+
         // ── Notifications ───────────────────────────────────────────────
         "notifications.status" => {
             let enabled = app.config.read().await.modules.notifications;
@@ -545,6 +655,25 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
     f.write_all(data)?;
     std::fs::rename(tmp, path)?;
     Ok(())
+}
+
+async fn status_account(app: &App) -> Option<String> {
+    app.status
+        .lock()
+        .await
+        .as_ref()
+        .map(|(engine, _)| engine.account().to_hex())
+}
+
+/// Set or clear the manual status (running module, or just saved for later).
+async fn set_manual(app: &Arc<App>, m: Option<opal_status::general::Manual>) -> Result<Value> {
+    let guard = app.status.lock().await;
+    match guard.as_ref() {
+        Some((engine, _)) => engine.set_manual(m.clone()).await,
+        None => app.status_store.set_manual(m.as_ref())?,
+    }
+    drop(guard);
+    Ok(json!({"manual": m}))
 }
 
 async fn notify_account(app: &App) -> Option<String> {

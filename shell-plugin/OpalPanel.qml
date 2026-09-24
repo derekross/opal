@@ -59,6 +59,7 @@ Item {
   readonly property var tabs: {
     var t = []
     if (notificationsOn) t.push({ value: "notifications", label: svc.unread > 0 ? "Inbox " + svc.unread : "Inbox" })
+    if (up && svc.statusOn) t.push({ value: "status", label: "Status" })
     if (up && svc.hasAccounts) {
       t.push({ value: "apps", label: "Apps" })
       t.push({ value: "activity", label: "Activity" })
@@ -257,6 +258,13 @@ Item {
           urgent: root.urgent
           panelOpen: root.panelOpen
           onOpened: root.closeRequested()
+        }
+        StatusView {
+          width: parent.width
+          visible: root.up && root.svc.configured && root.tab === "status"
+          svc: root.svc
+          foreground: root.foreground
+          urgent: root.urgent
         }
         AppsView {
           width: parent.width

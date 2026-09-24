@@ -14,6 +14,9 @@ use opal_core::ipc::IpcEvent;
 use opal_core::keystore::SecretStore;
 use opal_core::vault::Vault;
 use opal_notify::{NotifyEngine, NotifyStore};
+use opal_status::{StatusEngine, StatusStore};
+
+use crate::signers::BunkerSigner;
 use opal_signer::{
     NostrConnectUri, PolicyApprover, PromptHub, Signer, SignerSettings, SignerStore,
 };
@@ -35,6 +38,13 @@ pub struct App {
     /// `nostrconnect://` URIs handed to us (xdg handler, CLI) awaiting the UI.
     pub offers: Mutex<HashMap<String, NostrConnectUri>>,
     pub notify_store: NotifyStore,
+    pub status_store: StatusStore,
+    /// The running status module and what it was started with.
+    pub status: Mutex<Option<(StatusEngine, String)>>,
+    /// Connected external bunker (identity mode "external").
+    pub bunker: Mutex<Option<Arc<BunkerSigner>>>,
+    /// Why the status module isn't running, for the UI.
+    pub status_blocked: Mutex<Option<String>>,
     /// The running notifications module and what it was started with.
     pub notify: Mutex<Option<(NotifyEngine, String)>>,
 }
@@ -77,6 +87,7 @@ impl App {
         .context("loading apps")?;
 
         let notify_store = NotifyStore::new(db.clone()).context("notification tables")?;
+        let status_store = StatusStore::new(db.clone()).context("status tables")?;
         let (events, _) = broadcast::channel(256);
         Ok(Arc::new(Self {
             config: RwLock::new(config),
@@ -91,6 +102,10 @@ impl App {
             offers: Mutex::new(HashMap::new()),
             notify_store,
             notify: Mutex::new(None),
+            status_store,
+            status: Mutex::new(None),
+            bunker: Mutex::new(None),
+            status_blocked: Mutex::new(None),
         }))
     }
 
@@ -190,6 +205,8 @@ impl App {
             "modules": cfg.modules,
             "pending_prompts": self.prompts.pending().len(),
             "unread_notifications": self.unread_notifications().await,
+            "status_running": self.status.lock().await.is_some(),
+            "status_blocked": *self.status_blocked.lock().await,
             "auto_lock_minutes": cfg.signer.auto_lock_minutes,
         })
     }

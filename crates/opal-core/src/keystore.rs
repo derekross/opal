@@ -19,6 +19,8 @@ pub enum ItemKind {
     Account,
     /// A per-connection NIP-46 transport key, secret = hex secret key.
     ConnKey,
+    /// Our client key for an external bunker, secret = hex secret key.
+    ClientKey,
 }
 
 impl ItemKind {
@@ -26,6 +28,7 @@ impl ItemKind {
         match self {
             Self::Account => "account",
             Self::ConnKey => "conn-key",
+            Self::ClientKey => "client-key",
         }
     }
 }

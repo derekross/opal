@@ -7,7 +7,7 @@ icon, and features you switch on as you need them.
 |---|---|---|
 | **Signer** | working (P1) | NIP-46 remote signer ("bunker"). Your nsec lives in the system keyring, encrypted with your passphrase; apps log in with `bunker://` or `nostrconnect://` and you approve what they may do. Inspired by [Amber](https://github.com/greenart7c3/Amber). |
 | **Notifications** | working (P2) | Replies, mentions, reposts, reactions, zaps and NIP-17 DMs in the bar and as desktop notifications, from your NIP-65 relays, honoring your NIP-51 mute list (private entries too, when unlocked). Works read-only for any npub. Inspired by [Omastr](https://github.com/barrydeen/omastr). |
-| **Status** | planned (P3) | NIP-38 statuses: now-playing music from MPRIS, manual and automatic statuses, scrobble history. Grew out of [noscrobble](https://github.com/derekross/noscrobble). |
+| **Status** | working (P3) | NIP-38 statuses: what you're playing in any MPRIS player, a status you set (with expiry), and automatic ones (calendar via khal, away while locked, focus during Do Not Disturb). Local listening history, optionally published as kind 1073 scrobbles ([draft NIP](docs/nip-scrobble.md)). Signs with your local key or an external bunker. Grew out of [noscrobble](https://github.com/derekross/noscrobble). |
 
 ## Security model
 
@@ -39,6 +39,9 @@ opal status                  # lock state, accounts, modules
 opal bunker --qr             # a single-use bunker:// login for an app
 opal connect 'nostrconnect://…'
 opal prompts / opal approve <id> --remember 1h
+opal set-status "At Nostrville" --for 4h
+opal plays                   # now playing and recent listens
+opal watch name@domain       # read-only notifications for anyone
 omarchy-shell opal panel     # toggle the panel (bind it to a key)
 omarchy-shell opal lock
 ```
@@ -49,6 +52,8 @@ omarchy-shell opal lock
 crates/opal-core     config, key import, keyring store, vault
 crates/opal-signer   NIP-46 signer (protocol, URIs, permissions, request loop)
 crates/opal-notify   notifications (classification, relay engine, store, links)
+crates/opal-status   statuses and scrobbles (MPRIS, music tracker, auto statuses)
+docs/nip-scrobble.md draft NIP for kind 1073 scrobbles
 crates/opald         daemon (systemd user service)
 crates/opal-cli      `opal` command
 shell-plugin         Omarchy shell plugin (bar gem, panel, approval dialog)
