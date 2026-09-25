@@ -45,6 +45,7 @@ Item {
   // Watching someone is read-only, so nothing that writes is offered then.
   readonly property bool canSign: (identity.mode === "external" && !!identity.npub)
     || (identity.mode !== "read-only" && identity.mode !== "external" && hasAccounts)
+  readonly property bool signerOn: !status.modules || status.modules.signer !== false
   readonly property bool statusOn: canSign && !!status.modules && status.modules.status === true
   property var notifyStatus: ({})
   readonly property int unread: status.unread_notifications || 0
@@ -59,7 +60,7 @@ Item {
   // The last bunker URI created from the panel, shown until dismissed.
   property var lastBunker: null
 
-  readonly property int attentionCount: prompts.length + offers.length + (unlockRequest && locked ? 1 : 0)
+  readonly property int attentionCount: (signerOn ? prompts.length + offers.length : 0) + (unlockRequest && locked ? 1 : 0)
 
   signal message(string text, bool isError)
   signal panelToggleRequested()

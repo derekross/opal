@@ -50,6 +50,8 @@ Column {
   }
   // Signer settings only mean something with a key stored in Opal.
   readonly property bool hasKey: !!root.svc && root.svc.hasAccounts
+  // Settings that only concern answering apps over NIP-46.
+  readonly property bool signerOn: hasKey && root.svc.signerOn
   readonly property bool watching: !!root.cfg.identity && root.cfg.identity.mode === "read-only"
   readonly property bool external: !!root.cfg.identity && root.cfg.identity.mode === "external"
   property string idMode: watching ? "read-only" : external ? "external" : "local"
@@ -194,10 +196,10 @@ Column {
     onClicked: root.set({ signer: { lock_on_screen_lock: !checked } })
   }
 
-  PanelSectionHeader { text: "NEW APPS START WITH"; foreground: root.dim; visible: root.hasKey }
+  PanelSectionHeader { text: "NEW APPS START WITH"; foreground: root.dim; visible: root.signerOn }
   ButtonGroup {
     width: parent.width
-    visible: root.hasKey
+    visible: root.signerOn
     options: [
       { value: "basic", label: "Basic" },
       { value: "manual", label: "Ask for everything" }
@@ -209,7 +211,7 @@ Column {
 
   Toggle {
     width: parent.width
-    visible: root.hasKey
+    visible: root.signerOn
     label: "Privacy mode"
     description: "Don't keep an activity history (applies after a restart)"
     checked: root.signer.privacy_mode === true
@@ -219,7 +221,7 @@ Column {
 
   Toggle {
     width: parent.width
-    visible: root.hasKey
+    visible: root.signerOn
     label: "Connected to relays"
     description: "Turn off to stop answering every app at once"
     checked: root.svc ? root.svc.online : true
@@ -470,7 +472,7 @@ Column {
     color: root.dim
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
-    visible: root.hasKey
+    visible: root.signerOn
     text: "Signer relays: " + (root.signer.relays || []).join(", ")
   }
 }

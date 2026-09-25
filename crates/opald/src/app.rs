@@ -35,6 +35,8 @@ pub struct App {
     /// Last time the vault was used; drives auto-lock.
     last_activity: Mutex<Instant>,
     online: AtomicBool,
+    /// The NIP-46 signer has connected to its relays at least once.
+    pub signer_started: AtomicBool,
     /// `nostrconnect://` URIs handed to us (xdg handler, CLI) awaiting the UI.
     pub offers: Mutex<HashMap<String, NostrConnectUri>>,
     pub notify_store: NotifyStore,
@@ -99,6 +101,7 @@ impl App {
             events,
             last_activity: Mutex::new(Instant::now()),
             online: AtomicBool::new(true),
+            signer_started: AtomicBool::new(false),
             offers: Mutex::new(HashMap::new()),
             notify_store,
             notify: Mutex::new(None),
@@ -130,7 +133,11 @@ impl App {
 
     pub async fn set_online(&self, online: bool) {
         self.online.store(online, Ordering::Relaxed);
-        self.signer.set_online(online).await;
+        // The signer only answers apps while its module is on.
+        let signer_on = self.config.read().await.modules.signer;
+        if self.signer_started.load(Ordering::Relaxed) {
+            self.signer.set_online(online && signer_on).await;
+        }
         self.emit_state().await;
     }
 

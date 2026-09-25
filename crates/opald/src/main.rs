@@ -68,13 +68,6 @@ async fn main() -> Result<()> {
         store,
     })
     .await?;
-    // Relays can be slow to answer; the socket (and so the UI) comes up at once.
-    let signer = app.signer.clone();
-    tokio::spawn(async move {
-        if let Err(e) = signer.start().await {
-            tracing::error!("starting the signer failed: {e}");
-        }
-    });
     tasks::spawn_all(&app);
     modules::reconcile(&app).await;
     modules::connect_bunker_in_background(&app);

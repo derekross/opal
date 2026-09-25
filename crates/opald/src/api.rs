@@ -112,6 +112,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({"app": info, "rules": rules}))
         }
         "apps.create_bunker" => {
+            require_signer(app).await?;
             #[derive(Deserialize, Default)]
             struct P {
                 account: Option<String>,
@@ -204,6 +205,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(describe_nostrconnect(&NostrConnectUri::parse(&p.uri)?))
         }
         "nostrconnect.offer" => {
+            require_signer(app).await?;
             // Hand a URI to the UI (used by the xdg handler / CLI).
             let p: Uri = parse(params)?;
             let parsed = NostrConnectUri::parse(&p.uri)?;
@@ -228,6 +230,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             ))
         }
         "nostrconnect.accept" => {
+            require_signer(app).await?;
             #[derive(Deserialize)]
             struct P {
                 /// Either the URI itself or the id of an offer.
@@ -655,6 +658,14 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
     f.write_all(data)?;
     std::fs::rename(tmp, path)?;
     Ok(())
+}
+
+async fn require_signer(app: &App) -> Result<()> {
+    if app.config.read().await.modules.signer {
+        Ok(())
+    } else {
+        bail!("the signer module is off (turn it on in Settings)")
+    }
 }
 
 async fn status_account(app: &App) -> Option<String> {

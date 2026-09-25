@@ -60,7 +60,7 @@ Item {
     var t = []
     if (notificationsOn) t.push({ value: "notifications", label: svc.unread > 0 ? "Inbox " + svc.unread : "Inbox" })
     if (up && svc.statusOn) t.push({ value: "status", label: "Status" })
-    if (up && svc.hasAccounts) {
+    if (up && svc.hasAccounts && svc.signerOn) {
       t.push({ value: "apps", label: "Apps" })
       t.push({ value: "activity", label: "Activity" })
     }

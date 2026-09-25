@@ -33,8 +33,33 @@ async fn notify_identity(app: &App) -> Option<(PublicKey, bool)> {
 
 /// Make every optional module match the config.
 pub async fn reconcile(app: &Arc<App>) {
+    reconcile_signer(app).await;
     reconcile_notify(app).await;
     reconcile_status(app).await;
+}
+
+/// The NIP-46 signer: connect to its relays when on, disconnect when off
+/// (apps get no answers and no new connections are accepted).
+async fn reconcile_signer(app: &Arc<App>) {
+    use std::sync::atomic::Ordering;
+    let enabled = app.config.read().await.modules.signer;
+    if enabled {
+        if !app.signer_started.swap(true, Ordering::SeqCst) {
+            // Relays can be slow to answer; don't hold up the caller.
+            let signer = app.signer.clone();
+            tokio::spawn(async move {
+                if let Err(e) = signer.start().await {
+                    tracing::error!("starting the signer failed: {e}");
+                }
+            });
+            tracing::info!("signer started");
+        } else {
+            app.signer.set_online(app.is_online()).await;
+        }
+    } else if app.signer_started.load(Ordering::SeqCst) {
+        app.signer.set_online(false).await;
+        tracing::info!("signer off");
+    }
 }
 
 /// Start, stop, or restart the notifications module when the account or

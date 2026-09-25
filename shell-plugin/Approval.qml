@@ -23,8 +23,8 @@ Item {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color urgent: Color.urgent
 
-  readonly property var offer: svc && svc.offers.length > 0 ? svc.offers[0] : null
-  readonly property var prompt: svc && svc.prompts.length > 0 ? svc.prompts[0] : null
+  readonly property var offer: svc && svc.signerOn && svc.offers.length > 0 ? svc.offers[0] : null
+  readonly property var prompt: svc && svc.signerOn && svc.prompts.length > 0 ? svc.prompts[0] : null
   readonly property bool needUnlock: !!svc && svc.locked && svc.hasAccounts && (!!svc.unlockRequest || !!prompt)
   readonly property string mode: !svc ? "none"
     : needUnlock ? "unlock"
