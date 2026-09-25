@@ -154,7 +154,7 @@ async fn status_signer(
             let signer = LocalSigner {
                 vault: app.vault.clone(),
                 account: pk,
-                log: app.signer.store().cloned(),
+                on_sign: crate::signers::log_as_opal_status(app.signer.store().cloned()),
             };
             Ok((pk, Arc::new(signer), true, format!("local:{}", pk.to_hex())))
         }
@@ -257,7 +257,7 @@ pub fn connect_bunker_in_background(app: &Arc<App>) {
             cfg.identity.bunker_uri.clone()
         };
         let Some(uri) = uri else { return };
-        match BunkerSigner::connect(&app.vault, &uri).await {
+        match BunkerSigner::connect(app.vault.store(), &uri).await {
             Ok((b, _)) => {
                 *app.bunker.lock().await = Some(Arc::new(b));
                 reconcile(&app).await;

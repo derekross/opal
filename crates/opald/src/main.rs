@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     modules::connect_bunker_in_background(&app);
 
     let socket = args.socket.unwrap_or_else(paths::socket_path);
-    let server = ipc::serve(app.clone(), &socket);
+    let server = opal_kit::ipc::serve(app.clone(), &socket, "opald");
     tokio::select! {
         r = server => r?,
         _ = shutdown_signal() => tracing::info!("shutting down"),

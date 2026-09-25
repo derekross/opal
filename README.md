@@ -141,6 +141,7 @@ Bind a key to the panel, e.g. in `~/.config/hypr/hyprland.lua`:
 
 ```
 crates/opal-core     config, key import, keyring store, vault, NIP-05, database
+crates/opal-kit      shared runtime: signers, relays and outbox, control socket, QR
 crates/opal-signer   NIP-46 signer (protocol, URIs, permissions, request loop)
 crates/opal-notify   notifications (classification, relay engine, store, links)
 crates/opal-status   statuses and scrobbles (MPRIS, music tracker, auto statuses)

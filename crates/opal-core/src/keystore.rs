@@ -1,7 +1,9 @@
 //! Secret storage backed by the Secret Service (gnome-keyring, KWallet, …).
 //!
-//! Account keys are only ever written here as NIP-49 `ncryptsec` strings, so a
-//! copied keyring file is useless without the Opal passphrase.
+//! Opal account keys are only ever written here as NIP-49 `ncryptsec`
+//! strings, so a copied keyring file is useless without the Opal passphrase.
+//! Peridot's device identity is the exception: it is meant to work without a
+//! passphrase, so it is only as safe as the login keyring itself.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -9,8 +11,6 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::Result;
-
-const APPLICATION: &str = "opal";
 
 /// What an item in the store holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -21,6 +21,10 @@ pub enum ItemKind {
     ConnKey,
     /// Our client key for an external bunker, secret = hex secret key.
     ClientKey,
+    /// Peridot's passwordless identity, secret = hex secret key.
+    DeviceIdentity,
+    /// Peridot's random key for encrypting synced data, secret = hex.
+    SyncSecret,
 }
 
 impl ItemKind {
@@ -29,28 +33,37 @@ impl ItemKind {
             Self::Account => "account",
             Self::ConnKey => "conn-key",
             Self::ClientKey => "client-key",
+            Self::DeviceIdentity => "device-identity",
+            Self::SyncSecret => "sync-secret",
         }
     }
 }
 
 pub enum SecretStore {
-    Keyring(oo7::Keyring),
+    /// Items tagged `application = <app>`.
+    Keyring(oo7::Keyring, &'static str),
     /// In-process store for tests.
     Memory(Mutex<BTreeMap<(ItemKind, String), Zeroizing<String>>>),
 }
 
 impl SecretStore {
+    /// Opal's items in the login keyring.
     pub async fn keyring() -> Result<Self> {
-        Ok(Self::Keyring(oo7::Keyring::new().await?))
+        Self::keyring_for(crate::paths::AppDirs::OPAL).await
+    }
+
+    /// Another app's items in the login keyring.
+    pub async fn keyring_for(app: crate::paths::AppDirs) -> Result<Self> {
+        Ok(Self::Keyring(oo7::Keyring::new().await?, app.name))
     }
 
     pub fn memory() -> Self {
         Self::Memory(Mutex::new(BTreeMap::new()))
     }
 
-    fn attributes(kind: ItemKind, id: &str) -> HashMap<&'static str, String> {
+    fn attributes(app: &str, kind: ItemKind, id: &str) -> HashMap<&'static str, String> {
         HashMap::from([
-            ("application", APPLICATION.to_string()),
+            ("application", app.to_string()),
             ("kind", kind.as_str().to_string()),
             ("id", id.to_string()),
         ])
@@ -58,8 +71,8 @@ impl SecretStore {
 
     pub async fn put(&self, kind: ItemKind, id: &str, label: &str, secret: &str) -> Result<()> {
         match self {
-            Self::Keyring(k) => {
-                k.create_item(label, &Self::attributes(kind, id), secret, true)
+            Self::Keyring(k, app) => {
+                k.create_item(label, &Self::attributes(app, kind, id), secret, true)
                     .await?
             }
             Self::Memory(m) => {
@@ -73,8 +86,8 @@ impl SecretStore {
 
     pub async fn get(&self, kind: ItemKind, id: &str) -> Result<Option<Zeroizing<String>>> {
         match self {
-            Self::Keyring(k) => {
-                let items = k.search_items(&Self::attributes(kind, id)).await?;
+            Self::Keyring(k, app) => {
+                let items = k.search_items(&Self::attributes(app, kind, id)).await?;
                 match items.first() {
                     Some(item) => Ok(Some(secret_text(&item.secret().await?))),
                     None => Ok(None),
@@ -87,9 +100,9 @@ impl SecretStore {
     /// All `(id, secret)` pairs of one kind.
     pub async fn list(&self, kind: ItemKind) -> Result<Vec<(String, Zeroizing<String>)>> {
         match self {
-            Self::Keyring(k) => {
+            Self::Keyring(k, app) => {
                 let query = HashMap::from([
-                    ("application", APPLICATION.to_string()),
+                    ("application", app.to_string()),
                     ("kind", kind.as_str().to_string()),
                 ]);
                 let mut out = Vec::new();
@@ -114,7 +127,7 @@ impl SecretStore {
 
     pub async fn delete(&self, kind: ItemKind, id: &str) -> Result<()> {
         match self {
-            Self::Keyring(k) => k.delete(&Self::attributes(kind, id)).await?,
+            Self::Keyring(k, app) => k.delete(&Self::attributes(app, kind, id)).await?,
             Self::Memory(m) => {
                 m.lock().await.remove(&(kind, id.to_string()));
             }

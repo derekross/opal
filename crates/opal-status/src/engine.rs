@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures::future::BoxFuture;
 use nostr_sdk::prelude::*;
 use opal_core::config::{DEFAULT_PUBLISH_RELAYS, StatusConfig};
 use serde::Serialize;
@@ -25,19 +24,9 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 const AUTO_TTL: u64 = 30 * 60;
 const AUTO_REFRESH_BEFORE: u64 = 10 * 60;
 const MAX_PENDING_SCROBBLES: usize = 200;
-const SIGN_TIMEOUT: Duration = Duration::from_secs(15);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignError {
-    /// The key isn't available right now (vault locked, bunker offline).
-    Unavailable(String),
-    Failed(String),
-}
 
 /// Signs events as the user.
-pub trait StatusSigner: Send + Sync {
-    fn sign(&self, unsigned: UnsignedEvent) -> BoxFuture<'_, Result<Event, SignError>>;
-}
+pub use opal_kit::signer::{EventSigner as StatusSigner, SignError};
 
 pub struct StatusParams {
     pub account: PublicKey,
@@ -265,40 +254,13 @@ impl Runner {
     }
 
     async fn setup_relays(&mut self) {
-        let bootstrap: Vec<RelayUrl> = self
-            .bootstrap
-            .iter()
-            .filter_map(|r| RelayUrl::parse(r).ok())
-            .collect();
-        for r in &bootstrap {
-            let _ = self.client.add_relay(r).await;
-        }
-        self.client.connect().and_wait(Duration::from_secs(5)).await;
-        let filter = Filter::new().author(self.me).kind(Kind::RelayList);
-        let targets: Vec<(RelayUrl, Vec<Filter>)> = bootstrap
-            .iter()
-            .map(|r| (r.clone(), vec![filter.clone()]))
-            .collect();
-        let mut write = Vec::new();
-        if let Ok(events) = self
-            .client
-            .fetch_events(targets)
-            .timeout(FETCH_TIMEOUT)
-            .await
-            && let Some(ev) = events.iter().max_by_key(|e| e.created_at)
-        {
-            for (url, meta) in nip65::extract_relay_list(ev) {
-                if meta.is_none() || meta == Some(RelayMetadata::Write) {
-                    write.push(url);
-                }
-            }
-        }
-        for r in self
-            .cfg
-            .relays
-            .iter()
-            .filter_map(|r| RelayUrl::parse(r).ok())
-        {
+        let bootstrap = opal_kit::relays::parse_urls(&self.bootstrap);
+        let mut write =
+            opal_kit::relays::fetch_relay_list(&self.client, &bootstrap, self.me, FETCH_TIMEOUT)
+                .await
+                .map(|l| l.write)
+                .unwrap_or_default();
+        for r in opal_kit::relays::parse_urls(&self.cfg.relays) {
             if !write.contains(&r) {
                 write.push(r);
             }
@@ -532,26 +494,19 @@ impl Runner {
     /// Sign, but never wait long: an external signer may be slow or away,
     /// and this loop also drives everything else.
     async fn sign(&self, b: EventBuilder) -> Result<Event, SignError> {
-        match tokio::time::timeout(SIGN_TIMEOUT, self.signer.sign(b.finalize_unsigned(self.me)))
-            .await
-        {
-            Ok(r) => r,
-            Err(_) => Err(SignError::Unavailable(
-                "the signer didn't answer in time".into(),
-            )),
-        }
+        opal_kit::signer::sign_within(
+            self.signer.as_ref(),
+            b.finalize_unsigned(self.me),
+            opal_kit::signer::SIGN_TIMEOUT,
+        )
+        .await
     }
 
     async fn send(&self, ev: &Event) -> bool {
-        match self.client.send_event(ev).to(self.relays.clone()).await {
-            Ok(out) if !out.success.is_empty() => true,
-            Ok(out) => {
-                let why = out.failed.values().next().cloned().unwrap_or_default();
-                self.set_error(format!("no relay accepted it: {why}")).await;
-                false
-            }
+        match opal_kit::relays::publish(&self.client, ev, &self.relays).await {
+            Ok(_) => true,
             Err(e) => {
-                self.set_error(e.to_string()).await;
+                self.set_error(e).await;
                 false
             }
         }

@@ -15,15 +15,19 @@ pub struct Db {
 
 impl Db {
     pub fn open_default() -> Result<Self> {
-        let dir = paths::data_dir();
+        Self::open_default_for(paths::AppDirs::OPAL)
+    }
+
+    /// The app's database in its private (0700) data directory.
+    pub fn open_default_for(app: paths::AppDirs) -> Result<Self> {
         {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
-                .create(&dir)?;
+                .create(app.data_dir())?;
         }
-        Self::open(&dir.join("opal.db"))
+        Self::open(&app.db_file())
     }
 
     pub fn open(path: &Path) -> Result<Self> {

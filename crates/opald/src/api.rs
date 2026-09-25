@@ -470,16 +470,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 data: String,
             }
             let p: P = parse(params)?;
-            let code = qrcode::QrCode::new(p.data.as_bytes())?;
-            let svg = code
-                .render::<qrcode::render::svg::Color>()
-                .min_dimensions(256, 256)
-                .quiet_zone(true)
-                .build();
             // Returned inline (no file): the URI inside holds a login secret.
-            use base64::Engine;
-            let data = base64::engine::general_purpose::STANDARD.encode(svg.as_bytes());
-            Ok(json!({"data_url": format!("data:image/svg+xml;base64,{data}")}))
+            Ok(json!({"data_url": opal_kit::qr::svg_data_url(&p.data)?}))
         }
         // ── Identity ────────────────────────────────────────────────────
         "identity.resolve" => {
@@ -507,7 +499,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "identity.external" => {
             // Sign statuses through a bunker (e.g. Amber). Waits for approval.
             let p: Uri = parse(params)?;
-            let (bunker, pk) = crate::signers::BunkerSigner::connect(&app.vault, &p.uri).await?;
+            let (bunker, pk) =
+                crate::signers::BunkerSigner::connect(app.vault.store(), &p.uri).await?;
             *app.bunker.lock().await = Some(Arc::new(bunker));
             {
                 let mut cfg = app.config.write().await;

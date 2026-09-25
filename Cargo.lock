@@ -1939,6 +1939,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "opal-kit"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "futures",
+ "nostr-connect",
+ "nostr-sdk",
+ "opal-core",
+ "qrcode",
+ "reqwest",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "opal-notify"
 version = "0.2.0"
 dependencies = [
@@ -1981,6 +2002,7 @@ dependencies = [
  "futures",
  "nostr-sdk",
  "opal-core",
+ "opal-kit",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1995,16 +2017,14 @@ name = "opald"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "base64 0.23.1",
  "clap",
  "futures",
- "nostr-connect",
  "nostr-sdk",
  "opal-core",
+ "opal-kit",
  "opal-notify",
  "opal-signer",
  "opal-status",
- "qrcode",
  "rustix",
  "rustls",
  "serde",
@@ -2354,6 +2374,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
