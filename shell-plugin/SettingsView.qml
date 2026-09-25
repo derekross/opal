@@ -300,6 +300,7 @@ Column {
 
   Toggle {
     width: parent.width
+    visible: !!root.svc && root.svc.canSign
     label: "Status"
     description: "Now playing, your status, and scrobbles (NIP-38)"
     checked: root.modules.status === true
@@ -309,7 +310,7 @@ Column {
 
   Column {
     width: parent.width
-    visible: root.modules.status === true
+    visible: root.modules.status === true && !!root.svc && root.svc.canSign
     spacing: Style.space(8)
     leftPadding: Style.space(12)
 

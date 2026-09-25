@@ -41,7 +41,11 @@ Item {
   property var statusInfo: ({})
   property var plays: []
   property var playStats: ({})
-  readonly property bool statusOn: !!status.modules && status.modules.status === true
+  // Something can sign: a key in Opal, or a connected external signer.
+  // Watching someone is read-only, so nothing that writes is offered then.
+  readonly property bool canSign: (identity.mode === "external" && !!identity.npub)
+    || (identity.mode !== "read-only" && identity.mode !== "external" && hasAccounts)
+  readonly property bool statusOn: canSign && !!status.modules && status.modules.status === true
   property var notifyStatus: ({})
   readonly property int unread: status.unread_notifications || 0
   readonly property bool notificationsOn: !!status.modules && status.modules.notifications === true
