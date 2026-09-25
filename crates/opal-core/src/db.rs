@@ -16,11 +16,26 @@ pub struct Db {
 impl Db {
     pub fn open_default() -> Result<Self> {
         let dir = paths::data_dir();
-        std::fs::create_dir_all(&dir)?;
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)?;
+        }
         Self::open(&dir.join("opal.db"))
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        // Create the file private before SQLite opens it (-wal/-shm copy its mode).
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)?;
+        }
         let conn = Connection::open(path).map_err(db_err)?;
         #[cfg(unix)]
         {

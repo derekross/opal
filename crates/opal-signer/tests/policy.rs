@@ -285,3 +285,59 @@ async fn nostrconnect_grants_become_rules() {
     );
     assert_eq!(prompts.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn expired_bunker_links_are_refused() {
+    let e = env().await;
+    let s = signer(&e).await;
+    let (_, uri) = s
+        .create_bunker(
+            e.account,
+            None,
+            None,
+            Policy::Basic,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let err = client(&uri)
+        .get_public_key_async()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expired"), "{err}");
+}
+
+#[tokio::test]
+async fn forward_dated_and_auth_events_always_ask() {
+    let e = env().await;
+    let s = signer(&e).await;
+    let prompts = auto_answer(
+        e.prompts.clone(),
+        PromptAnswer {
+            allow: false,
+            remember: Remember::Once,
+        },
+    );
+    let (_, uri) = s
+        .create_bunker(e.account, None, None, Policy::Basic, None)
+        .await
+        .unwrap();
+    let app = client(&uri);
+    // A note dated a day ahead is not signed silently, even under Basic.
+    let future = Timestamp::now() + Duration::from_secs(86_400);
+    let err = EventBuilder::new(Kind::TextNote, "later")
+        .custom_created_at(future)
+        .finalize_async(&app)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("rejected"), "{err}");
+    // HTTP auth (NIP-98) is a login token: it asks.
+    assert!(sign(&app, 27235).await.is_err());
+    assert_eq!(prompts.load(Ordering::SeqCst), 2);
+    // An ordinary note still goes through on its own.
+    sign(&app, 1).await.unwrap();
+    assert_eq!(prompts.load(Ordering::SeqCst), 2);
+}

@@ -25,6 +25,7 @@ Column {
   readonly property var week: svc && svc.stats.week ? svc.stats.week : { allowed: 0, denied: 0 }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     color: root.dim
     font.family: Style.font.family
@@ -46,6 +47,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.entries.length === 0
     wrapMode: Text.Wrap
@@ -81,6 +83,7 @@ Column {
         anchors.right: parent.right
         spacing: Style.space(1)
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           elide: Text.ElideRight
           color: root.foreground
@@ -89,6 +92,7 @@ Column {
           text: modelData.app_name + " · " + U.describe(modelData.method, modelData.kind_label)
         }
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           elide: Text.ElideRight
           color: root.dim

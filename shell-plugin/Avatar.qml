@@ -18,6 +18,7 @@ Item {
     color: Style.selectedFillFor(root.foreground, Color.accent)
     visible: img.status !== Image.Ready
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       text: "󰀄"
       color: root.foreground
@@ -29,7 +30,8 @@ Item {
   Image {
     id: img
     anchors.fill: parent
-    source: root.picture
+    // Remote pictures come from strangers: https only.
+    source: root.picture.indexOf("https://") === 0 ? root.picture : ""
     sourceSize.width: root.size * 2
     sourceSize.height: root.size * 2
     fillMode: Image.PreserveAspectCrop

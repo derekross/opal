@@ -182,9 +182,22 @@ fn expiry(t: &Track, now_unix: u64) -> u64 {
     }
 }
 
+/// Players (browsers especially) take titles from the page you're on, so
+/// what gets published is cleaned and capped.
+pub fn clean_content(s: &str) -> String {
+    let flat: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    flat.chars().take(120).collect()
+}
+
 fn publish(t: &Track, link_style: &str, expires_at: u64) -> Action {
     Action::Publish {
-        content: t.display(),
+        content: clean_content(&t.display()),
         link: link_for(t, link_style),
         expires_at,
     }
@@ -198,9 +211,34 @@ pub fn link_for(t: &Track, style: &str) -> Option<String> {
         "youtube-music" => Some(format!("https://music.youtube.com/search?q={query}")),
         "spotify" => Some(format!("https://open.spotify.com/search/{query}")),
         _ => spotify_track(t)
-            .or_else(|| t.url.clone().filter(|u| u.starts_with("https://")))
+            .or_else(|| t.url.clone().filter(|u| is_music_link(u)))
             .or_else(|| Some(format!("https://music.youtube.com/search?q={query}"))),
     }
+}
+
+/// Only pass on the player's own link when it points at a music service;
+/// a web page playing media could otherwise put any URL on your status.
+fn is_music_link(u: &str) -> bool {
+    const HOSTS: &[&str] = &[
+        "music.youtube.com",
+        "open.spotify.com",
+        "soundcloud.com",
+        "bandcamp.com",
+        "tidal.com",
+        "listen.tidal.com",
+        "music.apple.com",
+        "deezer.com",
+        "www.deezer.com",
+        "wavlake.com",
+        "fountain.fm",
+    ];
+    let Some(rest) = u.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#', ':']).next().unwrap_or("");
+    HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
 }
 
 fn spotify_track(t: &Track) -> Option<String> {

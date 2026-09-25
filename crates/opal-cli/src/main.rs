@@ -1,6 +1,6 @@
 //! `opal` — command-line control for the Opal daemon.
 
-use std::io::{IsTerminal, Read};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -259,6 +259,9 @@ async fn run() -> Result<()> {
             qr,
         } => {
             let mut p = json!({"name": name, "policy": policy});
+            if policy.as_deref() == Some("full-trust") {
+                p["passphrase"] = json!(read_secret("Opal passphrase (needed for full trust): ")?);
+            }
             if !relays.is_empty() {
                 p["relays"] = json!(relays);
             }
@@ -579,7 +582,12 @@ async fn account(c: &mut Conn, cmd: AccountCmd, raw: bool) -> Result<()> {
                     bail!("cancelled");
                 }
             }
-            c.call("accounts.remove", json!({"pubkey": pubkey})).await?;
+            let passphrase = read_secret("Opal passphrase: ")?;
+            c.call(
+                "accounts.remove",
+                json!({"pubkey": pubkey, "passphrase": passphrase}),
+            )
+            .await?;
             println!("Removed.");
         }
     }
@@ -600,14 +608,15 @@ fn parse_duration(s: &str) -> Result<u64> {
     })
 }
 
-/// Read a secret without echo on a terminal, or from stdin when piped.
+/// Read a secret without echo on a terminal, or one line from stdin when
+/// piped (so several prompts can be answered from one pipe).
 fn read_secret(prompt: &str) -> Result<String> {
     if std::io::stdin().is_terminal() {
         Ok(rpassword::prompt_password(prompt)?)
     } else {
         let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s)?;
-        Ok(s.lines().next().unwrap_or_default().to_string())
+        std::io::stdin().read_line(&mut s)?;
+        Ok(s.trim_end_matches(['\n', '\r']).to_string())
     }
 }
 

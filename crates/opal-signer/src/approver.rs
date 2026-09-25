@@ -7,10 +7,13 @@ use nostr_sdk::prelude::{PublicKey, Timestamp, UnsignedEvent};
 use opal_core::config::Policy;
 use serde::Serialize;
 
-use crate::permissions::{Evaluation, Rule, Source, evaluate};
+use crate::permissions::{Evaluation, Rule, Source, evaluate, is_sensitive};
 use crate::prompts::PromptHub;
 use crate::protocol::Method;
 use crate::store::SignerStore;
+
+/// Prompts one app may have waiting at once; more are denied.
+const MAX_PENDING_PER_APP: usize = 3;
 
 /// Everything the user (or a rule) needs to decide on a request.
 #[derive(Debug, Clone, Serialize)]
@@ -81,15 +84,24 @@ impl Approver for PolicyApprover {
                 Ok(r) => r,
                 Err(e) => return Decision::Deny(Source::Error, e.to_string()),
             };
-            match evaluate(req.policy, &rules, &req.method, req.kind, now) {
+            let created_at = req.event.as_ref().map(|e| e.created_at.as_secs());
+            match evaluate(req.policy, &rules, &req.method, req.kind, created_at, now) {
                 Evaluation::Allow(s) => return Decision::Allow(s),
                 Evaluation::Deny(s) => return Decision::Deny(s, "denied by a saved rule".into()),
                 Evaluation::Ask => {}
             }
+            // One app can't queue up a wall of prompts.
+            if self.prompts.pending_for(&req.connection_id) >= MAX_PENDING_PER_APP {
+                return Decision::Deny(Source::Automatic, "too many pending requests".into());
+            }
             let Some(answer) = self.prompts.ask(req.clone()).await else {
                 return Decision::Deny(Source::Timeout, "no answer".into());
             };
-            if let Some(until) = answer.remember.until(now) {
+            if let Some(mut until) = answer.remember.until(now) {
+                // Sensitive kinds are never remembered for more than an hour.
+                if is_sensitive(&req.method, req.kind) {
+                    until = Some(until.map_or(now + 3600, |t| t.min(now + 3600)));
+                }
                 let rule = Rule {
                     app_id: req.connection_id.clone(),
                     method: req.method.clone(),

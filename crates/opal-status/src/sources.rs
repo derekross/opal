@@ -1,6 +1,16 @@
 //! Automatic status inputs: calendar (khal), screen lock, Do Not Disturb.
 
+use std::time::Duration;
+
 use tokio::process::Command;
+
+/// Run a helper with a timeout; a hung one must not stall the status loop.
+async fn output(cmd: &mut Command) -> Option<std::process::Output> {
+    tokio::time::timeout(Duration::from_secs(3), cmd.kill_on_drop(true).output())
+        .await
+        .ok()?
+        .ok()
+}
 
 /// Title of a timed event in progress, from `khal`. All-day events are
 /// ignored (they'd make you "in a meeting" all day).
@@ -70,9 +80,7 @@ pub async fn screen_locked() -> bool {
 
 /// Omarchy's notification Do Not Disturb switch.
 pub async fn do_not_disturb() -> bool {
-    Command::new("omarchy-shell")
-        .args(["notifications", "isDnd"])
-        .output()
+    output(Command::new("omarchy-shell").args(["notifications", "isDnd"]))
         .await
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)

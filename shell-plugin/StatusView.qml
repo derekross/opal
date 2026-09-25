@@ -52,6 +52,7 @@ Column {
 
   // ── Not running ────────────────────────────────────────────────
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: !root.running
     wrapMode: Text.Wrap
@@ -78,8 +79,11 @@ Column {
         source: root.np && root.np.art_url && (root.np.art_url.indexOf("https://") === 0 || root.np.art_url.indexOf("file://") === 0) ? root.np.art_url : ""
         fillMode: Image.PreserveAspectCrop
         asynchronous: true
+        sourceSize.width: 96
+        sourceSize.height: 96
       }
       Text {
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         visible: !root.np || !root.np.art_url
         text: "󰝚"
@@ -93,6 +97,7 @@ Column {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(2)
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         elide: Text.ElideRight
         color: root.foreground
@@ -101,6 +106,7 @@ Column {
         text: root.np ? root.np.title : "Nothing playing"
       }
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         elide: Text.ElideRight
         color: root.dim
@@ -123,6 +129,7 @@ Column {
     visible: root.running && !!root.general
     spacing: Style.space(8)
     Text {
+      textFormat: Text.PlainText
       width: parent.width - clearButton.width - parent.spacing
       anchors.verticalCenter: parent.verticalCenter
       wrapMode: Text.Wrap
@@ -205,6 +212,7 @@ Column {
         implicitWidth: chip.implicitWidth + Style.space(16)
         implicitHeight: chip.implicitHeight + Style.space(6)
         Text {
+          textFormat: Text.PlainText
           id: chip
           anchors.centerIn: parent
           color: root.foreground
@@ -226,6 +234,7 @@ Column {
         width: parent.width
         spacing: Style.space(1)
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           elide: Text.ElideRight
           color: root.foreground
@@ -234,6 +243,7 @@ Column {
           text: modelData.title + (modelData.artist ? " — " + modelData.artist : "")
         }
         Text {
+          textFormat: Text.PlainText
           color: root.dim
           font.family: Style.font.family
           font.pixelSize: Style.font.caption

@@ -131,6 +131,7 @@ Item {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               elide: Text.ElideRight
               color: root.foreground
@@ -148,6 +149,7 @@ Item {
               }
             }
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               elide: Text.ElideMiddle
               color: root.dim
@@ -206,6 +208,7 @@ Item {
 
         // ── Toast ─────────────────────────────────────────────────
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           visible: root.toast !== ""
           wrapMode: Text.Wrap
@@ -221,6 +224,7 @@ Item {
           visible: !root.up
           spacing: Style.space(8)
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             wrapMode: Text.Wrap
             color: root.dim
@@ -255,6 +259,61 @@ Item {
           urgent: root.urgent
         }
 
+        // ── Passphrase needed for a sensitive change ──────────────
+        Column {
+          width: parent.width
+          visible: root.up && !!root.svc.guarded
+          spacing: Style.space(8)
+          onVisibleChanged: if (visible) Qt.callLater(function() { guardField.forceActiveFocus() }); else guardField.text = ""
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            text: root.up && root.svc.guarded ? root.svc.guarded.why : ""
+          }
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+            TextField {
+              id: guardField
+              width: parent.width - guardOk.width - guardCancel.width - 2 * parent.spacing
+              password: true
+              placeholderText: "Opal passphrase"
+              foreground: root.foreground
+              onAccepted: { root.svc.confirmGuarded(text); text = "" }
+              Keys.onEscapePressed: root.svc.cancelGuarded()
+            }
+            Button {
+              id: guardOk
+              anchors.verticalCenter: guardField.verticalCenter
+              text: "Confirm"
+              bordered: true
+              foreground: root.foreground
+              onClicked: { root.svc.confirmGuarded(guardField.text); guardField.text = "" }
+            }
+            Button {
+              id: guardCancel
+              anchors.verticalCenter: guardField.verticalCenter
+              text: "Cancel"
+              foreground: root.foreground
+              onClicked: root.svc.cancelGuarded()
+            }
+          }
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            visible: root.up && root.svc.guardError !== ""
+            wrapMode: Text.Wrap
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            text: root.up ? root.svc.guardError : ""
+          }
+        }
+
         // ── Waiting requests ──────────────────────────────────────
         Button {
           width: parent.width
@@ -278,6 +337,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.up && root.svc.configured && root.pages.indexOf(root.tab) !== -1
           color: root.foreground
           font.family: root.fontFamily

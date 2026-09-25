@@ -1,25 +1,55 @@
 # Opal
 
-A modular Nostr suite for [Omarchy](https://omarchy.org): one daemon, one bar
-icon, and features you switch on as you need them.
+A Nostr suite for [Omarchy](https://omarchy.org), in your bar. One small
+daemon, one gem icon, and modules you switch on as you need them:
 
-| Module | Status | What it does |
-|---|---|---|
-| **Signer** | working (P1) | NIP-46 remote signer ("bunker"). Your nsec lives in the system keyring, encrypted with your passphrase; apps log in with `bunker://` or `nostrconnect://` and you approve what they may do. Inspired by [Amber](https://github.com/greenart7c3/Amber). |
-| **Notifications** | working (P2) | Replies, mentions, reposts, reactions, zaps and NIP-17 DMs in the bar and as desktop notifications, from your NIP-65 relays, honoring your NIP-51 mute list (private entries too, when unlocked). Works read-only for any npub. Inspired by [Omastr](https://github.com/barrydeen/omastr). |
-| **Status** | working (P3) | NIP-38 statuses: what you're playing in any MPRIS player, a status you set (with expiry), and automatic ones (calendar via khal, away while locked, focus during Do Not Disturb). Local listening history, optionally published as kind 1073 scrobbles ([draft NIP](docs/nip-scrobble.md)). Signs with your local key or an external bunker. Grew out of [noscrobble](https://github.com/derekross/noscrobble). |
+| Module | What it does |
+|---|---|
+| **Signer** | A NIP-46 remote signer ("bunker"). Your nsec stays in the system keyring, encrypted with your passphrase. Web and desktop apps log in with a `bunker://` link or a `nostrconnect://` QR/link, and you decide what each one may do. Inspired by [Amber](https://github.com/greenart7c3/Amber). |
+| **Notifications** | Replies, mentions, reposts, reactions, zaps and NIP-17 DMs in an Inbox and as desktop popups, from your NIP-65 relays, honoring your NIP-51 mute list (private entries too). Inspired by [Omastr](https://github.com/barrydeen/omastr). |
+| **Status** | NIP-38 statuses: what you're playing in any MPRIS player, a status you set, and automatic ones (calendar, away, focus). Optional scrobbles as kind 1073 ([draft NIP](docs/nip-scrobble.md)). Grew out of [noscrobble](https://github.com/derekross/noscrobble). |
 
-## Security model
+## Features
 
-- Account keys are stored in the Secret Service (gnome-keyring on Omarchy)
-  **only as NIP-49 `ncryptsec`**. Omarchy's default keyring has no password,
-  so the keyring alone is never enough to sign anything.
-- One Opal passphrase unlocks every account. Keys are held in memory only
-  while unlocked and are wiped on lock; the vault locks after a timeout and
-  when the screen locks.
-- Each app connection gets its own NIP-46 key and single-use secret, so apps
-  do not learn your npub until they ask for it, and a leaked `bunker://` URI
-  cannot be reused.
+### Profiles
+- Several keys, plus **read-only profiles**: watch anyone's notifications with an npub or a NIP-05 address (`you@example.com`), no key needed.
+- Import an nsec, hex key, `ncryptsec` (NIP-49) or recovery phrase (NIP-06), or create a new key.
+- Copy your npub or an encrypted backup (`ncryptsec`) from the panel.
+- Or sign through an **external signer** (e.g. Amber on your phone) by pasting its `bunker://` link.
+
+### Signer (NIP-46)
+- `bunker://` links (single-use, expire after an hour unused, QR code in the panel) and `nostrconnect://` links (click one anywhere; Opal asks you first).
+- Every NIP-46 method: `connect`, `get_public_key`, `sign_event`, NIP-04/NIP-44 encrypt and decrypt, `ping`, `switch_relays`, `logout`.
+- Each app gets its own key, so apps don't learn your npub until they ask, and one app's relay can't link your other apps.
+- Per-app policy: **Basic** (everyday actions like notes, reactions and reposts are signed automatically), **Ask** for everything, or **Trust**.
+- An approval dialog shows exactly what will be signed (content, key tags, odd dates), with "remember" choices from once to always.
+- Profile, follow-list, relay-list and mute-list updates, deletions, HTTP/Blossom auth tokens and wallet events always ask, and can be remembered for an hour at most. So does anything dated more than 10 minutes from now.
+- Activity log of what each app did and why it was allowed or denied (saved rule, basic policy, you…), with a privacy mode.
+- Kill switch to stop answering every app at once.
+
+### Notifications
+- Inbox with filters (all, replies, zaps, DMs), unread dot on the gem, context of the note being replied to or reacted to.
+- Desktop popups with avatars; clicking opens the note in your client of choice (Primal, Jumble, Coracle, Ditto, njump).
+- Zaps are checked (the zap request must be signed and addressed to you, and the amount must match the invoice) before they're shown.
+- DMs are decrypted with your key while Opal is unlocked; ones that arrive while locked wait until you unlock. Message text stays out of popups and storage unless you turn previews on.
+
+### Status (NIP-38)
+- Now playing from Spotify, browsers, mpv or any MPRIS player, with a link to the song, cleared when you pause. Choose which players to ignore.
+- Set a status with an optional link and an expiry (1h, 4h, today, until cleared).
+- Automatic statuses you can switch on: "In a meeting" during khal events, "Away" while the screen is locked, "Focusing" during Do Not Disturb.
+- A local listening history with top artists; optionally published as kind 1073 scrobbles.
+
+## Security
+
+Opal holds your nsec, so it's built to be careful:
+
+- **Encrypted at rest.** Keys go into the Secret Service (gnome-keyring) *only* as NIP-49 `ncryptsec` (scrypt, N=2^18). Omarchy's keyring has no password of its own, so your Opal passphrase is what protects the key. New passphrases must pass a strength check.
+- **In memory only while unlocked.** Keys are wiped when Opal locks: after a timeout you choose, when the screen locks, and before suspend. Only your own approvals count as activity; apps can't keep it unlocked.
+- **No leaks from the process.** Core dumps are off and other processes of your user can't read the daemon's memory.
+- **Local control socket** (`$XDG_RUNTIME_DIR/opal.sock`) is private to your user and checks the caller. Changes that weaken protection (full trust for an app, permanent allow rules, turning auto-lock off, deleting a key) need your passphrase. Wrong passphrases back off.
+- **Remote apps get nothing without a connection**, and only what their policy or you allow once connected. Strangers get no reply at all.
+- **Untrusted text is only ever shown as plain text** in the panel and in popups; images are https-only.
+- **Hardened systemd unit**: no capabilities, seccomp filter, read-only home except Opal's own directories.
 
 ## Install
 
@@ -27,38 +57,48 @@ icon, and features you switch on as you need them.
 ./dist/install.sh
 ```
 
-This builds `opald` and `opal`, installs them to `~/.local/bin`, enables the
+Builds `opald` and `opal`, installs them to `~/.local/bin`, enables the
 `opal.service` systemd user unit, registers the `nostrconnect://` link
-handler, and adds the Opal gem to the Omarchy bar. Click it to import or
-create your key.
+handler, and adds the Opal gem to the Omarchy bar. Click it to add a key or
+watch someone.
 
-Useful commands:
+Requires Rust (`sudo pacman -S rustup && rustup default stable`).
+
+## Use
+
+Everything is in the panel. From a terminal:
 
 ```sh
-opal status                  # lock state, accounts, modules
-opal bunker --qr             # a single-use bunker:// login for an app
-opal connect 'nostrconnect://…'
-opal prompts / opal approve <id> --remember 1h
-opal set-status "At Nostrville" --for 4h
-opal plays                   # now playing and recent listens
-opal watch name@domain       # read-only notifications for anyone
-omarchy-shell opal panel     # toggle the panel (bind it to a key)
-omarchy-shell opal lock
+opal status                          # lock state, profiles, modules
+opal unlock / opal lock
+opal account add [--generate]        # import (asks for the key) or create
+opal bunker --qr                     # single-use bunker:// login for an app
+opal connect 'nostrconnect://…'      # hand a link to the panel for approval
+opal prompts / opal approve <id> --remember 1h / opal deny <id>
+opal apps / opal revoke <id> / opal log
+opal inbox [--read]                  # notifications
+opal watch derekross@grownostr.org   # read-only profile
+opal set-status "At Nostrville" --for 4h / opal clear-status
+opal plays                           # now playing and recent listens
+opal module notifications on         # turn modules on or off
 ```
+
+Bind a key to the panel, e.g. in `~/.config/hypr/hyprland.lua`:
+`omarchy-shell opal panel` (also `opal notifications`, `opal lock`, `opal approvals`).
 
 ## Layout
 
 ```
-crates/opal-core     config, key import, keyring store, vault
+crates/opal-core     config, key import, keyring store, vault, NIP-05, database
 crates/opal-signer   NIP-46 signer (protocol, URIs, permissions, request loop)
 crates/opal-notify   notifications (classification, relay engine, store, links)
 crates/opal-status   statuses and scrobbles (MPRIS, music tracker, auto statuses)
-docs/nip-scrobble.md draft NIP for kind 1073 scrobbles
-crates/opald         daemon (systemd user service)
-crates/opal-cli      `opal` command
+crates/opald         the daemon: socket API, modules, locking, desktop popups
+crates/opal-cli      the `opal` command
 shell-plugin         Omarchy shell plugin (bar gem, panel, approval dialog)
 dist                 systemd unit, link handler, install script
-tests/interop        nostr-tools BunkerSigner against our signer
+docs/nip-scrobble.md draft NIP for kind 1073 scrobbles
+tests/interop        nostr-tools BunkerSigner against the signer
 ```
 
 ## Development
@@ -71,7 +111,8 @@ cargo test -p opal-core --test keyring -- --ignored    # real Secret Service
 ```
 
 The plugin's service is `keepLoaded`, so changes to `OpalService.qml` need
-`omarchy-restart-shell`.
+`omarchy-restart-shell`. For experiments, run a separate daemon that can't
+touch your keys: `opald --memory-keyring --socket /tmp/x.sock --db /tmp/x.db --config /tmp/x.toml`.
 
 ## License
 

@@ -33,6 +33,7 @@ async fn notify_identity(app: &App) -> Option<(PublicKey, bool)> {
 
 /// Make every optional module match the config.
 pub async fn reconcile(app: &Arc<App>) {
+    let _one_at_a_time = app.reconcile_lock.lock().await;
     reconcile_signer(app).await;
     reconcile_notify(app).await;
     reconcile_status(app).await;

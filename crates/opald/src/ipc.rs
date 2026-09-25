@@ -10,6 +10,7 @@ use opal_core::ipc::{IpcEvent, IpcRequest, IpcResponse};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
+use zeroize::Zeroize;
 
 use crate::api;
 use crate::app::App;
@@ -49,11 +50,9 @@ pub async fn serve(app: Arc<App>, path: &Path) -> Result<()> {
     }
 }
 
-/// Our uid, read from /proc to avoid unsafe libc calls.
+/// Our effective uid.
 fn unsafe_free_uid() -> u32 {
-    std::fs::metadata("/proc/self")
-        .map(|m| std::os::unix::fs::MetadataExt::uid(&m))
-        .unwrap_or(u32::MAX)
+    rustix::process::geteuid().as_raw()
 }
 
 async fn handle(app: Arc<App>, stream: UnixStream) -> Result<()> {
@@ -74,7 +73,7 @@ async fn handle(app: Arc<App>, stream: UnixStream) -> Result<()> {
     let mut line = String::new();
     let mut subscribed = false;
     loop {
-        line.clear();
+        line.zeroize();
         let n = (&mut reader)
             .take(MAX_LINE as u64 + 1)
             .read_line(&mut line)
@@ -102,18 +101,27 @@ async fn handle(app: Arc<App>, stream: UnixStream) -> Result<()> {
             }
         };
 
-        let resp = if req.method == "subscribe" {
+        if req.method == "subscribe" {
             if !subscribed {
                 subscribed = true;
                 spawn_forwarder(&app, tx.clone());
             }
-            IpcResponse {
+            let resp = IpcResponse {
                 id: req.id,
                 result: Some(app.status().await),
                 error: None,
+            };
+            if tx.send(serde_json::to_string(&resp)?).await.is_err() {
+                break;
             }
-        } else {
-            match api::dispatch(&app, &req.method, req.params).await {
+            continue;
+        }
+        // Each request runs on its own, so a slow one (a NIP-05 lookup, an
+        // external signer) doesn't hold up approvals on the same connection.
+        let app = app.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let resp = match api::dispatch(&app, &req.method, req.params).await {
                 Ok(v) => IpcResponse {
                     id: req.id,
                     result: Some(v),
@@ -124,12 +132,13 @@ async fn handle(app: Arc<App>, stream: UnixStream) -> Result<()> {
                     result: None,
                     error: Some(format!("{e:#}")),
                 },
+            };
+            if let Ok(line) = serde_json::to_string(&resp) {
+                let _ = tx.send(line).await;
             }
-        };
-        if tx.send(serde_json::to_string(&resp)?).await.is_err() {
-            break;
-        }
+        });
     }
+    line.zeroize();
     drop(tx);
     writer.await.ok();
     Ok(())

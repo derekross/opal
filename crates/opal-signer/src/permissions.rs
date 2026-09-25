@@ -14,7 +14,9 @@ use crate::protocol::Method;
 
 /// Kinds the Basic policy signs without asking: everyday, additive actions.
 /// Kinds that overwrite state (profile 0, follows 3, relay list 10002,
-/// mutes 10000) or delete (5) always ask. Stricter than Amber on purpose.
+/// mutes 10000) or delete (5) always ask, and so do HTTP (27235) and Blossom
+/// (24242) authorizations, which work as login tokens for other services.
+/// Stricter than Amber on purpose.
 pub const BASIC_KINDS: &[u16] = &[
     1,     // short note
     6,     // repost
@@ -22,10 +24,41 @@ pub const BASIC_KINDS: &[u16] = &[
     16,    // generic repost
     1111,  // comment
     9734,  // zap request
+    22242, // relay auth (a relay challenge; short-lived)
+];
+
+/// Kinds a client can never get blanket, long-lived permission for: they
+/// overwrite or destroy state, move money, or act as credentials. Requests
+/// for them via `perms`/`nip:<n>` are ignored and remembered answers are
+/// capped at one hour.
+pub const SENSITIVE_KINDS: &[u16] = &[
+    0,     // profile
+    3,     // follow list
+    5,     // deletion
+    62,    // request to vanish
+    9735,  // zap receipt
+    10000, // mute list
+    10002, // relay list
+    10050, // DM relays
+    13194, // wallet info
+    17375, // cashu wallet
     22242, // relay auth
+    23194, // wallet request
     24242, // blossom auth
     27235, // http auth
 ];
+
+/// Automatic approvals (policy or saved rule) only for events dated within
+/// this many seconds of now; anything else asks, so an app can't pre-mint
+/// tokens or backdate events behind your back.
+pub const AUTO_MAX_SKEW: u64 = 600;
+
+pub fn is_sensitive(method: &Method, kind: Option<u16>) -> bool {
+    match method {
+        Method::SignEvent => kind.is_none_or(|k| SENSITIVE_KINDS.contains(&k)),
+        _ => false,
+    }
+}
 
 /// How long an answer to a prompt is remembered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,8 +156,20 @@ pub fn evaluate(
     rules: &[Rule],
     method: &Method,
     kind: Option<u16>,
+    created_at: Option<u64>,
     now: u64,
 ) -> Evaluation {
+    // Oddly dated events always need a person to look at them.
+    if created_at.is_some_and(|t| t.abs_diff(now) > AUTO_MAX_SKEW) {
+        let denied = rules
+            .iter()
+            .any(|r| r.active(now) && r.matches(method, kind) && !r.allow);
+        return if denied {
+            Evaluation::Deny(Source::Rule)
+        } else {
+            Evaluation::Ask
+        };
+    }
     if policy == Policy::FullTrust {
         return Evaluation::Allow(Source::FullTrust);
     }
@@ -159,23 +204,36 @@ pub fn expand_perms(perms: &[PermSpec]) -> Vec<(Method, Option<u16>)> {
     for p in perms {
         match p {
             PermSpec::Method { method, kind } => {
-                // A bare `sign_event` would mean "sign anything"; never pre-approve that.
-                if *method == Method::SignEvent && kind.is_none() {
-                    continue;
-                }
-                if matches!(method, Method::Other(_) | Method::Connect) {
+                // Never pre-approve: signing anything (bare `sign_event`),
+                // sensitive kinds, or decrypting every conversation.
+                if is_sensitive(method, *kind)
+                    || matches!(
+                        method,
+                        Method::Other(_)
+                            | Method::Connect
+                            | Method::Nip04Decrypt
+                            | Method::Nip44Decrypt
+                    )
+                {
                     continue;
                 }
                 out.push((method.clone(), *kind));
             }
             PermSpec::Nip { nip } => {
                 for k in kinds::kinds_of_nip(*nip) {
-                    out.push((Method::SignEvent, Some(k)));
+                    if !SENSITIVE_KINDS.contains(&k) {
+                        out.push((Method::SignEvent, Some(k)));
+                    }
                 }
             }
         }
     }
-    out.dedup();
+    let mut seen = Vec::new();
+    out.retain(|p| {
+        let new = !seen.contains(p);
+        seen.push(p.clone());
+        new
+    });
     out
 }
 
@@ -198,7 +256,14 @@ mod tests {
     fn full_trust_beats_everything() {
         let rules = [rule(Method::SignEvent, None, false, None)];
         assert_eq!(
-            evaluate(Policy::FullTrust, &rules, &Method::SignEvent, Some(1), 10),
+            evaluate(
+                Policy::FullTrust,
+                &rules,
+                &Method::SignEvent,
+                Some(1),
+                None,
+                10
+            ),
             Evaluation::Allow(Source::FullTrust)
         );
     }
@@ -210,7 +275,14 @@ mod tests {
             rule(Method::SignEvent, None, false, None),
         ];
         assert_eq!(
-            evaluate(Policy::Manual, &rules, &Method::SignEvent, Some(1), 10),
+            evaluate(
+                Policy::Manual,
+                &rules,
+                &Method::SignEvent,
+                Some(1),
+                None,
+                10
+            ),
             Evaluation::Deny(Source::Rule)
         );
     }
@@ -219,11 +291,25 @@ mod tests {
     fn kind_specific_rules_only_match_their_kind() {
         let rules = [rule(Method::SignEvent, Some(1), true, None)];
         assert_eq!(
-            evaluate(Policy::Manual, &rules, &Method::SignEvent, Some(1), 10),
+            evaluate(
+                Policy::Manual,
+                &rules,
+                &Method::SignEvent,
+                Some(1),
+                None,
+                10
+            ),
             Evaluation::Allow(Source::Rule)
         );
         assert_eq!(
-            evaluate(Policy::Manual, &rules, &Method::SignEvent, Some(7), 10),
+            evaluate(
+                Policy::Manual,
+                &rules,
+                &Method::SignEvent,
+                Some(7),
+                None,
+                10
+            ),
             Evaluation::Ask
         );
     }
@@ -232,18 +318,32 @@ mod tests {
     fn expired_rules_are_ignored() {
         let rules = [rule(Method::Nip44Decrypt, None, true, Some(100))];
         assert_eq!(
-            evaluate(Policy::Manual, &rules, &Method::Nip44Decrypt, None, 99),
+            evaluate(
+                Policy::Manual,
+                &rules,
+                &Method::Nip44Decrypt,
+                None,
+                None,
+                99
+            ),
             Evaluation::Allow(Source::Rule)
         );
         assert_eq!(
-            evaluate(Policy::Manual, &rules, &Method::Nip44Decrypt, None, 100),
+            evaluate(
+                Policy::Manual,
+                &rules,
+                &Method::Nip44Decrypt,
+                None,
+                None,
+                100
+            ),
             Evaluation::Ask
         );
     }
 
     #[test]
     fn basic_policy() {
-        let e = |m: Method, k| evaluate(Policy::Basic, &[], &m, k, 0);
+        let e = |m: Method, k| evaluate(Policy::Basic, &[], &m, k, None, 0);
         assert_eq!(
             e(Method::GetPublicKey, None),
             Evaluation::Allow(Source::BasicPolicy)
@@ -265,7 +365,7 @@ mod tests {
         assert_eq!(e(Method::Nip44Decrypt, None), Evaluation::Ask);
         // Manual asks even for the basic kinds.
         assert_eq!(
-            evaluate(Policy::Manual, &[], &Method::SignEvent, Some(1), 0),
+            evaluate(Policy::Manual, &[], &Method::SignEvent, Some(1), None, 0),
             Evaluation::Ask
         );
     }
@@ -289,8 +389,74 @@ mod tests {
                 (Method::Nip44Encrypt, None),
                 (Method::SignEvent, Some(14)),
                 (Method::SignEvent, Some(15)),
-                (Method::SignEvent, Some(10050)),
-            ]
+            ],
+            "DM relay list (10050) is sensitive"
         );
+    }
+
+    #[test]
+    fn requested_perms_never_grant_dangerous_things() {
+        let perms = crate::perms::parse_perms(
+            "sign_event:0,sign_event:3,sign_event:5,sign_event:27235,nip44_decrypt,nip04_decrypt,nip:1,nip:2,nip:9,nip:62,nip:98",
+        );
+        assert_eq!(
+            expand_perms(&perms),
+            vec![],
+            "nothing sensitive, no blanket decrypt"
+        );
+    }
+
+    #[test]
+    fn oddly_dated_events_always_ask() {
+        let trusted = [rule(Method::SignEvent, Some(1), true, None)];
+        // Within 10 minutes: automatic as usual.
+        assert_eq!(
+            evaluate(
+                Policy::Basic,
+                &[],
+                &Method::SignEvent,
+                Some(1),
+                Some(1000),
+                1300
+            ),
+            Evaluation::Allow(Source::BasicPolicy)
+        );
+        // An hour in the future: ask, even with full trust or a saved rule.
+        for policy in [Policy::Basic, Policy::FullTrust] {
+            assert_eq!(
+                evaluate(
+                    policy,
+                    &trusted,
+                    &Method::SignEvent,
+                    Some(1),
+                    Some(1000 + 3600),
+                    1000
+                ),
+                Evaluation::Ask
+            );
+        }
+        // Deny rules still deny.
+        let denied = [rule(Method::SignEvent, Some(1), false, None)];
+        assert_eq!(
+            evaluate(
+                Policy::Basic,
+                &denied,
+                &Method::SignEvent,
+                Some(1),
+                Some(0),
+                5000
+            ),
+            Evaluation::Deny(Source::Rule)
+        );
+    }
+
+    #[test]
+    fn auth_tokens_ask_under_basic() {
+        for k in [24242, 27235] {
+            assert_eq!(
+                evaluate(Policy::Basic, &[], &Method::SignEvent, Some(k), None, 0),
+                Evaluation::Ask
+            );
+        }
     }
 }

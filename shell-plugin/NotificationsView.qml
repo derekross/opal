@@ -71,6 +71,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     wrapMode: Text.Wrap
     color: root.dim
@@ -100,6 +101,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.items.length === 0
     wrapMode: Text.Wrap
@@ -145,6 +147,7 @@ Column {
             radius: width / 2
             color: Color.popups.background
             Text {
+              textFormat: Text.PlainText
               anchors.centerIn: parent
               text: root.glyph(modelData.type)
               color: modelData.type === "zap" ? Color.accent : root.foreground
@@ -158,6 +161,7 @@ Column {
           width: parent.width - Style.space(42)
           spacing: Style.space(2)
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             elide: Text.ElideRight
             color: root.foreground
@@ -167,6 +171,7 @@ Column {
             text: root.name(modelData) + " " + root.verb(modelData)
           }
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: text !== "" && modelData.type !== "reaction"
             wrapMode: Text.Wrap
@@ -178,6 +183,7 @@ Column {
             text: modelData.type === "dm" && !modelData.detail ? "" : (modelData.detail || "")
           }
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: !!modelData.context
             elide: Text.ElideRight
@@ -187,6 +193,7 @@ Column {
             text: "on: " + (modelData.context || "").replace(/\s+/g, " ")
           }
           Text {
+            textFormat: Text.PlainText
             color: root.dim
             font.family: Style.font.family
             font.pixelSize: Style.font.caption

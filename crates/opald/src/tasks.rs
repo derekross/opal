@@ -30,8 +30,13 @@ async fn forward_signer_events(app: Arc<App>) {
             Err(RecvError::Closed) => break,
         };
         match &ev {
-            // Signing counts as use for the auto-lock timer.
-            SignerEvent::Request { allowed: true, .. } => app.touch().await,
+            // Only *your* approvals count as use for the auto-lock timer, so an
+            // app can't keep the vault unlocked by making requests.
+            SignerEvent::Request {
+                allowed: true,
+                source: opal_signer::permissions::Source::User,
+                ..
+            } => app.touch().await,
             SignerEvent::UnlockNeeded {
                 app_name, method, ..
             } => notify::unlock_needed(&app, app_name, method.as_str()).await,
@@ -91,11 +96,17 @@ async fn watch_hyprland_lock(app: Arc<App>) {
 }
 
 async fn hyprland_session_locked() -> Option<bool> {
-    let out = tokio::process::Command::new("hyprctl")
-        .args(["-j", "monitors"])
-        .output()
-        .await
-        .ok()?;
+    // A hung hyprctl must not stall this watcher (it would stop locking).
+    let out = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::process::Command::new("hyprctl")
+            .args(["-j", "monitors"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
     let monitors: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     let locked = monitors.as_array()?.iter().any(|m| {
         m["solitaryBlockedBy"]

@@ -39,7 +39,7 @@ Column {
       svc.lastBunker = r
       svc.refreshApps()
       svc.call("qr.svg", { data: r.uri }, function(err, q) {
-        if (!err) root.qrPath = "file://" + q.path + "?" + Date.now()
+        if (!err) root.qrPath = q.data_url
       })
     })
   }
@@ -110,6 +110,7 @@ Column {
         spacing: Style.space(8)
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.Wrap
           color: root.foreground
@@ -128,6 +129,7 @@ Column {
           smooth: false
         }
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           elide: Text.ElideMiddle
           color: root.dim
@@ -181,6 +183,7 @@ Column {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: root.apps.length === 0
       wrapMode: Text.Wrap
@@ -218,6 +221,7 @@ Column {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(1)
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               elide: Text.ElideRight
               color: root.foreground
@@ -226,6 +230,7 @@ Column {
               text: modelData.display_name
             }
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               elide: Text.ElideRight
               color: root.dim
@@ -264,6 +269,7 @@ Column {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       wrapMode: Text.Wrap
       color: root.foreground
@@ -273,6 +279,7 @@ Column {
       text: parent.app.display_name || ""
     }
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       wrapMode: Text.Wrap
       color: root.dim
@@ -296,9 +303,10 @@ Column {
       value: parent.app.policy || "basic"
       foreground: root.foreground
       onChanged: function(v) {
-        root.svc.run("apps.update", { id: root.selectedId, policy: v }, function() {
+        root.svc.runGuarded("apps.update", { id: root.selectedId, policy: v }, function() {
           root.svc.refreshApps()
-        })
+          root.loadDetail()
+        }, "Trusting an app fully lets it sign anything. Confirm with your Opal passphrase.")
       }
     }
 
@@ -307,6 +315,7 @@ Column {
       foreground: root.dim
     }
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: parent.rules.length === 0
       wrapMode: Text.Wrap
@@ -323,6 +332,7 @@ Column {
         implicitHeight: Math.max(ruleText.implicitHeight, delButton.implicitHeight)
 
         Text {
+          textFormat: Text.PlainText
           id: ruleText
           anchors.left: parent.left
           anchors.right: delButton.left

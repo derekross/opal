@@ -25,6 +25,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 const AUTO_TTL: u64 = 30 * 60;
 const AUTO_REFRESH_BEFORE: u64 = 10 * 60;
 const MAX_PENDING_SCROBBLES: usize = 200;
+const SIGN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignError {
@@ -242,6 +243,13 @@ impl Runner {
                         let meeting = crate::sources::current_meeting().await;
                         changed |= meeting != auto.meeting;
                         auto.meeting = meeting;
+                    }
+                    // Anything waiting for a signer that doesn't say when it's
+                    // ready (an external one) is retried every minute.
+                    if seconds.is_multiple_of(60)
+                        && (!self.pending_status.is_empty() || !self.pending_scrobbles.is_empty())
+                    {
+                        self.flush_pending().await;
                     }
                     // Expired manual statuses and auto refreshes are checked every 30s.
                     if changed || seconds.is_multiple_of(30) {
@@ -521,8 +529,17 @@ impl Runner {
         }
     }
 
+    /// Sign, but never wait long: an external signer may be slow or away,
+    /// and this loop also drives everything else.
     async fn sign(&self, b: EventBuilder) -> Result<Event, SignError> {
-        self.signer.sign(b.finalize_unsigned(self.me)).await
+        match tokio::time::timeout(SIGN_TIMEOUT, self.signer.sign(b.finalize_unsigned(self.me)))
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(SignError::Unavailable(
+                "the signer didn't answer in time".into(),
+            )),
+        }
     }
 
     async fn send(&self, ev: &Event) -> bool {

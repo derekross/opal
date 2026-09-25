@@ -15,8 +15,12 @@ use crate::permissions::Remember;
 #[derive(Debug, Clone, Serialize)]
 pub struct Prompt {
     pub id: String,
+    /// Arrival order; stable even for prompts from the same second.
+    pub seq: u64,
     pub created_at: u64,
     pub kind_label: Option<String>,
+    /// Sensitive requests (credentials, overwrites…) can't be remembered long.
+    pub sensitive: bool,
     #[serde(flatten)]
     pub request: ApprovalRequest,
 }
@@ -39,6 +43,7 @@ type Pending = HashMap<String, (Prompt, oneshot::Sender<PromptAnswer>)>;
 pub struct PromptHub {
     pending: Arc<Mutex<Pending>>,
     events: broadcast::Sender<PromptEvent>,
+    next_seq: std::sync::atomic::AtomicU64,
 }
 
 impl Default for PromptHub {
@@ -46,6 +51,7 @@ impl Default for PromptHub {
         Self {
             pending: Arc::default(),
             events: broadcast::channel(64).0,
+            next_seq: std::sync::atomic::AtomicU64::new(1),
         }
     }
 }
@@ -82,8 +88,12 @@ impl PromptHub {
         let id = crate::server::random_hex(8);
         let prompt = Prompt {
             id: id.clone(),
+            seq: self
+                .next_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             created_at: Timestamp::now().as_secs(),
             kind_label: request.kind.map(kinds::label),
+            sensitive: crate::permissions::is_sensitive(&request.method, request.kind),
             request,
         };
         let (tx, rx) = oneshot::channel();
@@ -122,7 +132,15 @@ impl PromptHub {
             .values()
             .map(|(p, _)| p.clone())
             .collect();
-        v.sort_by_key(|p| p.created_at);
+        v.sort_by_key(|p| p.seq);
         v
+    }
+
+    /// How many prompts one app has waiting.
+    pub fn pending_for(&self, connection_id: &str) -> usize {
+        lock(&self.pending)
+            .values()
+            .filter(|(p, _)| p.request.connection_id == connection_id)
+            .count()
     }
 }

@@ -23,6 +23,8 @@ use crate::uri::{NostrConnectUri, bunker_uri};
 /// Requests older or newer than this are ignored (replays, broken clocks).
 const MAX_CLOCK_SKEW_SECS: u64 = 300;
 const SEEN_CAPACITY: usize = 10_000;
+/// Requests handled at the same time (each may wait for a prompt).
+const MAX_CONCURRENT_REQUESTS: usize = 32;
 /// How long to wait for relays to connect before carrying on anyway.
 const RELAY_CONNECT_WAIT: Duration = Duration::from_secs(5);
 /// Activity older than this is pruned.
@@ -94,6 +96,9 @@ struct Inner {
     seen: Mutex<Seen>,
     events: broadcast::Sender<SignerEvent>,
     sub_id: SubscriptionId,
+    unlock_nags: Mutex<std::collections::HashMap<String, u64>>,
+    /// Caps how many requests are handled at once.
+    busy: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Default)]
@@ -175,6 +180,8 @@ impl Signer {
                 seen: Mutex::new(Seen::default()),
                 events,
                 sub_id: SubscriptionId::new("opal-nip46"),
+                unlock_nags: Mutex::new(std::collections::HashMap::new()),
+                busy: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             }),
         }
     }
@@ -206,8 +213,15 @@ impl Signer {
                 } = n
                     && event.kind == Kind::NostrConnect
                 {
+                    // Over the limit, requests wait here instead of piling up tasks.
+                    let Ok(permit) = inner.busy.clone().acquire_owned().await else {
+                        break;
+                    };
                     let inner = inner.clone();
-                    tokio::spawn(async move { inner.handle_event(*event, relay_url).await });
+                    tokio::spawn(async move {
+                        inner.handle_event(*event, relay_url).await;
+                        drop(permit);
+                    });
                 }
             }
         }))
@@ -301,9 +315,13 @@ impl Signer {
             transport: Keys::generate(),
             client: Some(uri.client),
             secret_hash: None,
-            name: uri.name.clone(),
-            url: uri.url.clone(),
-            image: uri.image.clone(),
+            name: uri
+                .name
+                .as_deref()
+                .map(clean_label)
+                .filter(|s| !s.is_empty()),
+            url: uri.url.clone().filter(|u| u.starts_with("https://")),
+            image: uri.image.clone().filter(|u| u.starts_with("https://")),
             relays: uri.relays.clone(),
             policy,
             requested_perms: uri.perms.clone(),
@@ -406,6 +424,19 @@ impl Inner {
         let _ = self.events.send(e);
     }
 
+    /// "Unlock needed" at most once a minute per app.
+    async fn unlock_nag_due(&self, conn_id: &str) -> bool {
+        let now = Timestamp::now().as_secs();
+        let mut last = self.unlock_nags.lock().await;
+        match last.get(conn_id) {
+            Some(t) if now.saturating_sub(*t) < 60 => false,
+            _ => {
+                last.insert(conn_id.to_string(), now);
+                true
+            }
+        }
+    }
+
     async fn check_account(&self, account: &PublicKey) -> Result<(), SignerError> {
         if self.vault.accounts().await?.contains(account) {
             Ok(())
@@ -427,19 +458,45 @@ impl Inner {
         Ok(())
     }
 
+    /// Subscribe on each relay only to the apps that use it, so one app's
+    /// relay can't link your other apps together, and let go of relays no
+    /// app uses any more.
     async fn resubscribe(&self) -> Result<(), SignerError> {
-        let keys = self.conns.transport_keys().await;
-        if keys.is_empty() {
-            // Nothing to listen for; an unknown subscription id is fine.
-            let _ = self.client.unsubscribe(&self.sub_id).await;
+        let conns = self.conns.all().await;
+        let since = Timestamp::now() - Duration::from_secs(60);
+        let mut per_relay: Vec<(RelayUrl, Vec<PublicKey>)> = Vec::new();
+        for c in &conns {
+            for r in &c.relays {
+                match per_relay.iter_mut().find(|(u, _)| u == r) {
+                    Some((_, keys)) => keys.push(c.transport.public_key()),
+                    None => per_relay.push((r.clone(), vec![c.transport.public_key()])),
+                }
+            }
+        }
+        // Drop relays nothing needs (the default ones stay connected).
+        for url in self.client.relays().await.into_keys() {
+            let used = per_relay.iter().any(|(u, _)| *u == url)
+                || self.settings.default_relays.contains(&url);
+            if !used {
+                let _ = self.client.remove_relay(&url).force().await;
+            }
+        }
+        let _ = self.client.unsubscribe(&self.sub_id).await;
+        if per_relay.is_empty() {
             return Ok(());
         }
-        let filter = Filter::new()
-            .kind(Kind::NostrConnect)
-            .pubkeys(keys)
-            .since(Timestamp::now() - Duration::from_secs(60));
+        let targets: Vec<(RelayUrl, Vec<Filter>)> = per_relay
+            .into_iter()
+            .map(|(url, keys)| {
+                let f = Filter::new()
+                    .kind(Kind::NostrConnect)
+                    .pubkeys(keys)
+                    .since(since);
+                (url, vec![f])
+            })
+            .collect();
         self.client
-            .subscribe(filter)
+            .subscribe(targets)
             .with_id(self.sub_id.clone())
             .await
             .map_err(|e| SignerError::Client(e.to_string()))?;
@@ -460,17 +517,12 @@ impl Inner {
     }
 
     async fn handle_event(&self, event: Event, relay: RelayUrl) {
-        if event.verify().is_err() {
-            return;
-        }
         let now = Timestamp::now().as_secs();
         if event.created_at.as_secs().abs_diff(now) > MAX_CLOCK_SKEW_SECS {
             tracing::debug!(id = %event.id, "dropping stale request");
             return;
         }
-        if !self.first_time(&event).await {
-            return;
-        }
+        // Route before doing anything expensive: it must be for one of ours.
         let mut conn = None;
         for pk in event.tags.public_keys() {
             if let Some(c) = self.conns.get_by_transport(&pk).await {
@@ -479,6 +531,15 @@ impl Inner {
             }
         }
         let Some(conn) = conn else { return };
+        // Only the connected app may talk to a claimed connection; anyone
+        // else is dropped without a reply (no probing, no reply spam).
+        let client = event.pubkey;
+        if conn.client.is_some_and(|c| c != client) {
+            return;
+        }
+        if event.verify().is_err() {
+            return;
+        }
 
         let transport = Transport::detect(&event.content);
         let secret = conn.transport.secret_key();
@@ -490,14 +551,22 @@ impl Inner {
             tracing::debug!(id = %event.id, "undecryptable or malformed request");
             return;
         };
+        // An unclaimed bunker link only understands `connect`.
+        if conn.client.is_none() && req.method != Method::Connect {
+            return;
+        }
+        if !self.first_time(&event).await {
+            return;
+        }
 
-        let client = event.pubkey;
         let res = match self.process(&conn, &client, &req).await {
             Ok(result) => Response::ok(&req.id, result),
             Err(error) => Response::err(&req.id, error),
         };
-        self.reply(&conn, &client, transport, &res, Some(relay))
-            .await;
+        // Reply on the connection's relays (and the one it came in on, if
+        // that is one of them); never somewhere a stranger chose.
+        let via = conn.relays.contains(&relay).then_some(relay);
+        self.reply(&conn, &client, transport, &res, via).await;
 
         if req.method == Method::Logout && res.error.is_none() {
             self.conns.remove(&conn.id).await;
@@ -543,34 +612,53 @@ impl Inner {
         if conn.client.as_ref() == Some(client) {
             return Ok("ack".into());
         }
-        if conn.client.is_some() {
-            return Err("already connected".into());
-        }
-        // Unclaimed bunker connection: the single-use secret must match.
-        if !conn.secret_matches(req.param(1).unwrap_or_default()) {
-            return Err("invalid secret".into());
-        }
+        let given = req.param(1).unwrap_or_default().to_string();
         let meta: ClientMetadata = req
             .param(3)
             .and_then(|m| serde_json::from_str(m).ok())
             .unwrap_or_default();
         let perms = parse_perms(req.param(2).unwrap_or_default());
+        let now = Timestamp::now();
+        // Check and claim in one step, so two clients racing with the same
+        // secret can't both get in.
+        let mut refused = None;
         let updated = self
             .conns
             .update(&conn.id, |c| {
+                if c.client.is_some() {
+                    refused = Some("already connected");
+                    return;
+                }
+                if c.expires_unused_at.is_some_and(|t| t <= now) {
+                    refused = Some("this login link has expired");
+                    return;
+                }
+                if !c.secret_matches(&given) {
+                    refused = Some("invalid secret");
+                    return;
+                }
                 c.client = Some(*client);
                 c.secret_hash = None;
                 c.expires_unused_at = None;
-                c.last_used = Some(Timestamp::now());
+                c.last_used = Some(now);
                 c.requested_perms = perms;
                 if c.name.is_none() {
-                    c.name = meta.name.filter(|s| !s.is_empty());
+                    c.name = meta.name.map(|n| clean_label(&n)).filter(|s| !s.is_empty());
                 }
-                c.url = c.url.take().or(meta.url);
-                c.image = c.image.take().or(meta.image);
+                c.url = c
+                    .url
+                    .take()
+                    .or(meta.url.filter(|u| u.starts_with("https://")));
+                c.image = c
+                    .image
+                    .take()
+                    .or(meta.image.filter(|u| u.starts_with("https://")));
             })
             .await
             .ok_or("connection removed")?;
+        if let Some(why) = refused {
+            return Err(why.into());
+        }
         self.emit(SignerEvent::Connected {
             connection: updated.info(),
         });
@@ -635,11 +723,13 @@ impl Inner {
 
         let timeout = self.settings.pending_timeout;
         if !self.vault.is_unlocked() {
-            self.emit(SignerEvent::UnlockNeeded {
-                connection_id: conn.id.clone(),
-                app_name: conn.display_name(),
-                method: req.method.clone(),
-            });
+            if self.unlock_nag_due(&conn.id).await {
+                self.emit(SignerEvent::UnlockNeeded {
+                    connection_id: conn.id.clone(),
+                    app_name: conn.display_name(),
+                    method: req.method.clone(),
+                });
+            }
             if self.vault.wait_unlocked(timeout).await.is_err() {
                 return self.finish(&approval, Source::Locked, Err("signer is locked".into()));
             }
@@ -657,7 +747,9 @@ impl Inner {
 
         let keys = match self.vault.keys(&conn.account).await {
             Ok(k) => k,
-            Err(e) => return self.finish(&approval, Source::Error, Err(e.to_string())),
+            Err(_) => {
+                return self.finish(&approval, Source::Error, Err("signer unavailable".into()));
+            }
         };
         let sk = keys.secret_key();
         let cp = approval.counterparty;
@@ -767,6 +859,24 @@ impl Inner {
             tracing::warn!("sending reply failed: {e}");
         }
     }
+}
+
+/// App names come from the app itself: keep them short, single-line, and
+/// unable to pass as command-line options.
+pub fn clean_label(s: &str) -> String {
+    let one_line: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    one_line
+        .trim_start_matches('-')
+        .trim()
+        .chars()
+        .take(60)
+        .collect()
 }
 
 pub(crate) fn random_hex(bytes: usize) -> String {

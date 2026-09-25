@@ -68,6 +68,24 @@ pub fn classify(input: &str) -> Result<Input> {
     Ok(Input::Nip05(addr))
 }
 
+/// Like [`resolve`], but refuses a bare 64-hex string: in a "watch someone"
+/// field that is as likely to be a pasted *secret* key, which would then be
+/// sent to relays as if it were a public one.
+pub async fn resolve_public(input: &str) -> Result<Resolved> {
+    let s = input.trim();
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::Invalid(
+            "enter an npub or a NIP-05 address (a bare hex key could be a secret key)".into(),
+        ));
+    }
+    if s.starts_with("nsec1") || s.starts_with("ncryptsec1") {
+        return Err(Error::Invalid(
+            "that's a secret key; to watch someone use their npub or NIP-05 address".into(),
+        ));
+    }
+    resolve(s).await
+}
+
 /// Resolve `input` to a public key, looking up NIP-05 addresses over HTTPS.
 pub async fn resolve(input: &str) -> Result<Resolved> {
     match classify(input)? {

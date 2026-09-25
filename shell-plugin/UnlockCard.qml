@@ -32,6 +32,7 @@ Column {
   onVisibleChanged: if (visible) focusField()
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     wrapMode: Text.Wrap
     color: root.foreground
@@ -68,6 +69,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.error !== ""
     wrapMode: Text.Wrap

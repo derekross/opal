@@ -269,12 +269,25 @@ impl Config {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
         }
         let text = toml::to_string_pretty(self).map_err(|e| Error::Config(e.to_string()))?;
+        // Private: it can hold an external signer's bunker:// URI.
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text)?;
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
         std::fs::rename(tmp, path)?;
         Ok(())
     }

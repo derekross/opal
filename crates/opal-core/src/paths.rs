@@ -2,20 +2,23 @@ use std::path::PathBuf;
 
 const APP: &str = "opal";
 
-fn join(base: Option<PathBuf>, fallback: &str) -> PathBuf {
-    base.unwrap_or_else(|| PathBuf::from(fallback)).join(APP)
+/// Never fall back to a shared directory like /tmp: without a home the
+/// daemon refuses to start rather than put keys-adjacent data there.
+fn join(base: Option<PathBuf>, what: &str) -> PathBuf {
+    base.unwrap_or_else(|| panic!("no {what} directory (is HOME set?)"))
+        .join(APP)
 }
 
 pub fn config_dir() -> PathBuf {
-    join(dirs::config_dir(), "/tmp")
+    join(dirs::config_dir(), "config")
 }
 
 pub fn data_dir() -> PathBuf {
-    join(dirs::data_dir(), "/tmp")
+    join(dirs::data_dir(), "data")
 }
 
 pub fn cache_dir() -> PathBuf {
-    join(dirs::cache_dir(), "/tmp")
+    join(dirs::cache_dir(), "cache")
 }
 
 pub fn config_file() -> PathBuf {
@@ -24,6 +27,6 @@ pub fn config_file() -> PathBuf {
 
 pub fn socket_path() -> PathBuf {
     dirs::runtime_dir()
-        .unwrap_or_else(std::env::temp_dir)
+        .expect("XDG_RUNTIME_DIR is not set")
         .join("opal.sock")
 }

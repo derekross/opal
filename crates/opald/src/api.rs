@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use nostr_sdk::prelude::nip49::KeySecurity;
 use nostr_sdk::prelude::{Keys, PublicKey, Timestamp, ToBech32};
 use opal_core::config::{Config, Policy};
 use opal_core::import::{ImportOptions, parse_secret};
@@ -14,6 +15,7 @@ use opal_signer::store::ActivityQuery;
 use opal_signer::{NostrConnectUri, PromptAnswer};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 use crate::app::{App, parse_relays};
 use crate::profiles;
@@ -39,8 +41,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "passphrase.change" => {
             #[derive(Deserialize)]
             struct P {
-                old: String,
-                new: String,
+                old: Zeroizing<String>,
+                new: Zeroizing<String>,
             }
             let p: P = parse(params)?;
             check_passphrase_strength(&p.new)?;
@@ -52,8 +54,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "accounts.list" => Ok(app.status().await["accounts"].clone()),
         "accounts.add" => accounts_add(app, params).await,
         "accounts.remove" => {
-            let p: Pk = parse(params)?;
-            let pk = p.pubkey()?;
+            #[derive(Deserialize)]
+            struct P {
+                pubkey: String,
+                passphrase: Option<Zeroizing<String>>,
+            }
+            let p: P = parse(params)?;
+            require_passphrase(app, p.passphrase.as_ref()).await?;
+            let pk = PublicKey::parse(&p.pubkey)?;
             for c in app.signer.connections().await {
                 if c.account == pk.to_hex() {
                     app.signer.remove_connection(&c.id).await?;
@@ -146,6 +154,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 relays: Option<Vec<String>>,
                 policy: Option<Policy>,
                 unused_ttl_secs: Option<u64>,
+                passphrase: Option<Zeroizing<String>>,
             }
             let p: P = parse_or_default(params)?;
             let account = account_or_current(app, p.account.as_deref())?;
@@ -153,6 +162,9 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 Some(pol) => pol,
                 None => app.config.read().await.signer.default_policy,
             };
+            if policy == Policy::FullTrust {
+                require_passphrase(app, p.passphrase.as_ref()).await?;
+            }
             let (info, uri) = app
                 .signer
                 .create_bunker(
@@ -160,7 +172,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     p.name,
                     p.relays.map(|r| parse_relays(&r)),
                     policy,
-                    p.unused_ttl_secs.map(Duration::from_secs),
+                    // Unused links stop working after an hour unless asked otherwise.
+                    Some(Duration::from_secs(
+                        p.unused_ttl_secs.unwrap_or(3600).clamp(60, 7 * 86_400),
+                    )),
                 )
                 .await?;
             Ok(json!({"app": info, "uri": uri}))
@@ -172,8 +187,12 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 name: Option<String>,
                 policy: Option<Policy>,
                 relays: Option<Vec<String>>,
+                passphrase: Option<Zeroizing<String>>,
             }
             let p: P = parse(params)?;
+            if p.policy == Some(Policy::FullTrust) {
+                require_passphrase(app, p.passphrase.as_ref()).await?;
+            }
             let info = app
                 .signer
                 .update_connection(&p.id, p.name, p.policy, p.relays.map(|r| parse_relays(&r)))
@@ -192,8 +211,12 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 kind: Option<u16>,
                 allow: bool,
                 remember: Option<Remember>,
+                passphrase: Option<Zeroizing<String>>,
             }
             let p: P = parse(params)?;
+            if p.allow && matches!(p.remember, None | Some(Remember::Always)) {
+                require_passphrase(app, p.passphrase.as_ref()).await?;
+            }
             let now = Timestamp::now().as_secs();
             let Some(until) = p.remember.unwrap_or(Remember::Always).until(now) else {
                 bail!("a saved rule needs a duration other than \"once\"");
@@ -235,10 +258,23 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             // Hand a URI to the UI (used by the xdg handler / CLI).
             let p: Uri = parse(params)?;
             let parsed = NostrConnectUri::parse(&p.uri)?;
+            check_relays(&parsed)?;
             let id = parsed.client.to_hex();
+            let mut offers = app.offers.lock().await;
+            // A link can't replace another app's waiting request, and there
+            // can't be a pile of them.
+            if offers.iter().any(|(oid, _, _)| *oid == id) {
+                bail!("that app is already waiting for your approval");
+            }
+            if offers.len() >= 5 {
+                bail!("too many apps waiting; answer those first");
+            }
+            let seq = app.next_offer_seq();
             let mut data = describe_nostrconnect(&parsed);
             data["id"] = json!(id);
-            app.offers.lock().await.insert(id, parsed);
+            data["seq"] = json!(seq);
+            offers.push((id, seq, parsed));
+            drop(offers);
             app.emit("nostrconnect_offer", data.clone());
             Ok(data)
         }
@@ -247,9 +283,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!(
                 offers
                     .iter()
-                    .map(|(id, u)| {
+                    .map(|(id, seq, u)| {
                         let mut d = describe_nostrconnect(u);
                         d["id"] = json!(id);
+                        d["seq"] = json!(seq);
                         d
                     })
                     .collect::<Vec<_>>()
@@ -267,16 +304,19 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 /// `method` or `method:kind` strings to allow from now on.
                 #[serde(default)]
                 grant: Vec<String>,
+                passphrase: Option<Zeroizing<String>>,
             }
             let p: P = parse(params)?;
             let uri = match (&p.uri, &p.offer_id) {
                 (Some(u), _) => NostrConnectUri::parse(u)?,
-                (None, Some(id)) => app
-                    .offers
-                    .lock()
-                    .await
-                    .remove(id)
-                    .ok_or(anyhow!("that request is gone"))?,
+                (None, Some(id)) => {
+                    let mut offers = app.offers.lock().await;
+                    let pos = offers
+                        .iter()
+                        .position(|(oid, _, _)| oid == id)
+                        .ok_or(anyhow!("that request is gone"))?;
+                    offers.remove(pos).2
+                }
                 (None, None) => bail!("uri or offer_id required"),
             };
             let account = account_or_current(app, p.account.as_deref())?;
@@ -284,7 +324,16 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 Some(pol) => pol,
                 None => app.config.read().await.signer.default_policy,
             };
-            let grant = expand_perms(&opal_signer::perms::parse_perms(&p.grant.join(",")));
+            if policy == Policy::FullTrust {
+                require_passphrase(app, p.passphrase.as_ref()).await?;
+            }
+            check_relays(&uri)?;
+            // Only what the app itself asked for (and never anything sensitive).
+            let requested = expand_perms(&uri.perms);
+            let grant: Vec<_> = expand_perms(&opal_signer::perms::parse_perms(&p.grant.join(",")))
+                .into_iter()
+                .filter(|g| requested.contains(g))
+                .collect();
             let info = app
                 .signer
                 .accept_nostrconnect(&uri, account, policy, &grant)
@@ -293,7 +342,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
         "nostrconnect.reject" => {
             let p: Id = parse(params)?;
-            Ok(json!({"removed": app.offers.lock().await.remove(&p.id).is_some()}))
+            let mut offers = app.offers.lock().await;
+            let before = offers.len();
+            offers.retain(|(oid, _, _)| *oid != p.id);
+            Ok(json!({"removed": offers.len() != before}))
         }
 
         // ── Prompts ─────────────────────────────────────────────────────
@@ -355,12 +407,48 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // ── Settings ────────────────────────────────────────────────────
         "config.get" => Ok(json!(*app.config.read().await)),
         "config.set" => {
-            // Merge a partial config into the current one.
-            let mut current = serde_json::to_value(&*app.config.read().await)?;
-            merge(&mut current, params);
-            let new: Config = serde_json::from_value(current).context("invalid settings")?;
-            new.save_to(&app.config_path)?;
-            *app.config.write().await = new.clone();
+            // Merge a partial config into the current one, under the write
+            // lock so concurrent changes can't overwrite each other.
+            let pass = params
+                .get("passphrase")
+                .and_then(|v| v.as_str())
+                .map(|s| Zeroizing::new(s.to_string()));
+            let mut patch = params;
+            if let Some(o) = patch.as_object_mut() {
+                o.remove("passphrase");
+            }
+            let new = {
+                let current = app.config.read().await.clone();
+                let mut merged = serde_json::to_value(&current)?;
+                merge(&mut merged, patch);
+                let new: Config = serde_json::from_value(merged).context("invalid settings")?;
+                let s_old = &current.signer;
+                let s_new = &new.signer;
+                let loosens = (s_old.auto_lock_minutes.is_some()
+                    && s_new.auto_lock_minutes.is_none())
+                    || s_new.auto_lock_minutes.unwrap_or(u32::MAX)
+                        > s_old.auto_lock_minutes.unwrap_or(u32::MAX)
+                    || (s_old.lock_on_screen_lock && !s_new.lock_on_screen_lock)
+                    || (s_new.default_policy == Policy::FullTrust
+                        && s_old.default_policy != Policy::FullTrust);
+                if loosens
+                    && app
+                        .vault
+                        .accounts()
+                        .await
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false)
+                {
+                    require_passphrase(app, pass.as_ref()).await?;
+                }
+                let mut guard = app.config.write().await;
+                if serde_json::to_value(&*guard)? != serde_json::to_value(&current)? {
+                    bail!("settings changed meanwhile; try again");
+                }
+                new.save_to(&app.config_path)?;
+                *guard = new.clone();
+                new
+            };
             crate::modules::reconcile(app).await;
             app.emit_state().await;
             Ok(json!(new))
@@ -376,8 +464,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         "qr.svg" => {
-            // Render a QR code (e.g. a bunker URI) to a private file the panel
-            // can show. The URI's secret is single-use, so the file is too.
+            // Render a QR code (e.g. a bunker URI) for the panel.
             #[derive(Deserialize)]
             struct P {
                 data: String,
@@ -389,9 +476,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 .min_dimensions(256, 256)
                 .quiet_zone(true)
                 .build();
-            let path = opal_core::paths::socket_path().with_file_name("opal-qr.svg");
-            write_private(&path, svg.as_bytes())?;
-            Ok(json!({"path": path}))
+            // Returned inline (no file): the URI inside holds a login secret.
+            use base64::Engine;
+            let data = base64::engine::general_purpose::STANDARD.encode(svg.as_bytes());
+            Ok(json!({"data_url": format!("data:image/svg+xml;base64,{data}")}))
         }
         // ── Identity ────────────────────────────────────────────────────
         "identity.resolve" => {
@@ -402,7 +490,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "identity.watch" => {
             // Watch someone (read-only): resolve, save, turn notifications on.
             let p: Input = parse(params)?;
-            let r = opal_core::identity::resolve(&p.input).await?;
+            let r = opal_core::identity::resolve_public(&p.input).await?;
             {
                 let mut cfg = app.config.write().await;
                 cfg.identity.mode = opal_core::config::IdentityMode::ReadOnly;
@@ -617,7 +705,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 .ok_or(anyhow!("no such notification"))?;
             let client = app.config.read().await.notifications.client.clone();
             let url = notification_url(&client, &n).ok_or(anyhow!("nothing to open"))?;
-            tokio::process::Command::new("xdg-open").arg(&url).spawn()?;
+            crate::notify::open_url(&url);
             Ok(json!({"url": url}))
         }
         "notifications.block" => {
@@ -651,31 +739,43 @@ async fn accounts_add(app: &Arc<App>, params: Value) -> Result<Value> {
     #[derive(Deserialize)]
     struct P {
         /// nsec, hex, ncryptsec or recovery phrase; omit to generate a key.
-        secret: Option<String>,
+        secret: Option<Zeroizing<String>>,
         /// The Opal passphrase (sets it if this is the first account).
-        passphrase: String,
+        passphrase: Zeroizing<String>,
         nickname: Option<String>,
-        ncryptsec_password: Option<String>,
+        ncryptsec_password: Option<Zeroizing<String>>,
         account_index: Option<u32>,
-        mnemonic_passphrase: Option<String>,
+        mnemonic_passphrase: Option<Zeroizing<String>>,
     }
     let p: P = parse(params)?;
     let first = app.vault.accounts().await?.is_empty();
     if first {
         check_passphrase_strength(&p.passphrase)?;
     }
-    let keys = match p.secret.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        None => Keys::generate(),
-        Some(secret) => parse_secret(
-            secret,
-            ImportOptions {
-                ncryptsec_password: p.ncryptsec_password.as_deref(),
-                account_index: p.account_index,
-                mnemonic_passphrase: p.mnemonic_passphrase.as_deref(),
-            },
-        )?,
+    let imported = p
+        .secret
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let (keys, security) = match imported {
+        None => (Keys::generate(), KeySecurity::Medium),
+        // We can't know how an imported key was handled before.
+        Some(secret) => (
+            parse_secret(
+                secret,
+                ImportOptions {
+                    ncryptsec_password: p.ncryptsec_password.as_ref().map(|s| s.as_str()),
+                    account_index: p.account_index,
+                    mnemonic_passphrase: p.mnemonic_passphrase.as_ref().map(|s| s.as_str()),
+                },
+            )?,
+            KeySecurity::Unknown,
+        ),
     };
-    let pk = app.vault.add_account(keys, &p.passphrase).await?;
+    let pk = app
+        .vault
+        .add_account_with(keys, &p.passphrase, security)
+        .await?;
     app.accounts
         .add(&pk, p.nickname.as_deref(), Timestamp::now().as_secs())?;
     if first && !app.vault.is_unlocked() {
@@ -690,18 +790,27 @@ async fn accounts_add(app: &Arc<App>, params: Value) -> Result<Value> {
     Ok(json!({"pubkey": pk.to_hex(), "npub": pk.to_bech32()?}))
 }
 
-fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let tmp = path.with_extension("tmp");
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.write_all(data)?;
-    std::fs::rename(tmp, path)?;
+/// nostrconnect relays must be proper TLS relays, not local or plain ones.
+fn check_relays(uri: &NostrConnectUri) -> Result<()> {
+    for r in &uri.relays {
+        let u = url::Url::parse(r.as_str())?;
+        let host = u.host_str().unwrap_or_default();
+        let local = host == "localhost"
+            || host.ends_with(".local")
+            || host
+                .parse::<std::net::IpAddr>()
+                .map(|ip| {
+                    ip.is_loopback()
+                        || match ip {
+                            std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+                            std::net::IpAddr::V6(v6) => v6.is_unique_local(),
+                        }
+                })
+                .unwrap_or(false);
+        if u.scheme() != "wss" || local {
+            bail!("the app asked to use {r}; only public wss:// relays are allowed");
+        }
+    }
     Ok(())
 }
 
@@ -764,11 +873,32 @@ fn notification_url(client: &str, n: &opal_notify::StoredNotification) -> Option
     }
 }
 
+/// New passphrases guard every key against offline guessing (the keyring
+/// itself has no password), so they must be strong, not just long.
 fn check_passphrase_strength(p: &str) -> Result<()> {
-    if p.chars().count() < 8 {
-        bail!("use a passphrase of at least 8 characters");
+    if p.chars().count() < 10 {
+        bail!("use a passphrase of at least 10 characters");
+    }
+    let score = zxcvbn::zxcvbn(p, &[]).score();
+    if (score as u8) < 3 {
+        bail!("that passphrase is too easy to guess; try a few random words");
     }
     Ok(())
+}
+
+/// Actions that weaken protection need the Opal passphrase, so another
+/// program running as you can't quietly do them through the socket.
+async fn require_passphrase(app: &App, given: Option<&Zeroizing<String>>) -> Result<()> {
+    match given {
+        Some(p) if !p.is_empty() => {
+            app.vault
+                .verify_passphrase(p)
+                .await
+                .map_err(|_| anyhow!("wrong passphrase"))?;
+            Ok(())
+        }
+        _ => Err(anyhow!("this change needs your Opal passphrase")),
+    }
 }
 
 fn account_or_current(app: &App, given: Option<&str>) -> Result<PublicKey> {
@@ -838,7 +968,7 @@ fn once() -> Remember {
 
 #[derive(Deserialize)]
 struct Passphrase {
-    passphrase: String,
+    passphrase: Zeroizing<String>,
 }
 
 #[derive(Deserialize)]

@@ -20,6 +20,15 @@ Column {
 
   spacing: Style.space(10)
 
+  // Never carry a pasted key from one mode into another (an nsec pasted
+  // under Import must not end up as a "read-only" npub), and don't keep
+  // secrets in fields once the page is gone.
+  function clearFields() {
+    secret.text = ""; ncPass.text = ""; pass.text = ""; nick.text = ""; error = ""
+  }
+  onAddModeChanged: clearFields()
+  onVisibleChanged: if (!visible) { clearFields(); adding = false; confirmRemove = "" }
+
   readonly property var accounts: svc ? svc.accounts : []
   readonly property bool readOnlyActive: !!svc && svc.readOnly
 
@@ -65,7 +74,8 @@ Column {
     if (confirmRemove !== p.id) { confirmRemove = p.id; return }
     confirmRemove = ""
     if (p.readOnly) svc.run("identity.unwatch", null, function() { root.svc.refreshConfig() })
-    else svc.run("accounts.remove", { pubkey: p.pubkey })
+    else svc.runGuarded("accounts.remove", { pubkey: p.pubkey }, null,
+      "Deleting removes this key from the computer. Confirm with your Opal passphrase.")
   }
 
   function add() {
@@ -130,6 +140,7 @@ Column {
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.space(1)
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             elide: Text.ElideRight
             color: root.foreground
@@ -139,6 +150,7 @@ Column {
             text: modelData.label + (modelData.current ? "  (in use)" : "")
           }
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             elide: Text.ElideMiddle
             color: root.dim
@@ -184,6 +196,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.confirmRemove !== ""
     wrapMode: Text.Wrap
@@ -221,6 +234,7 @@ Column {
       onChanged: function(v) { root.addMode = v; root.error = "" }
     }
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: root.addMode === "read-only"
       wrapMode: Text.Wrap
@@ -233,7 +247,7 @@ Column {
       id: secret
       width: parent.width
       visible: root.addMode !== "generate"
-      password: root.addMode === "import"
+      password: root.addMode !== "read-only"
       placeholderText: root.addMode === "read-only" ? "npub1… or name@domain" : "nsec, ncryptsec or recovery phrase"
       foreground: root.foreground
       onAccepted: if (root.addMode === "read-only") root.add()
@@ -258,11 +272,12 @@ Column {
       width: parent.width
       visible: root.addMode !== "read-only"
       password: true
-      placeholderText: root.accounts.length === 0 ? "Choose an Opal passphrase (8+ characters)" : "Your Opal passphrase"
+      placeholderText: root.accounts.length === 0 ? "Choose an Opal passphrase (a few random words)" : "Your Opal passphrase"
       foreground: root.foreground
       onAccepted: root.add()
     }
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: root.error !== ""
       wrapMode: Text.Wrap

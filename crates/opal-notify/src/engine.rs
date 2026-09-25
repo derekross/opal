@@ -92,6 +92,8 @@ impl NotifyEngine {
             status: status.clone(),
             muted: HashSet::new(),
             started: Timestamp::now().as_secs(),
+            mute_event: None,
+            private_mutes: None,
         };
         let task = tokio::spawn(run.run());
         Self {
@@ -132,6 +134,10 @@ struct Runner {
     status: Arc<RwLock<NotifyStatus>>,
     muted: HashSet<String>,
     started: u64,
+    /// The mute list in effect (newest seen) and its private entries, kept
+    /// so a failed fetch or a locked vault doesn't un-mute anyone.
+    mute_event: Option<Event>,
+    private_mutes: Option<(EventId, HashSet<String>)>,
 }
 
 /// The user's relay lists and mutes.
@@ -160,7 +166,7 @@ impl Runner {
         }
         self.client.connect().and_wait(CONNECT_WAIT).await;
 
-        let lists = self.fetch_lists(&bootstrap).await;
+        let lists = self.fetch_lists(&bootstrap).await.unwrap_or_default();
         let read = if lists.read.is_empty() {
             bootstrap.clone()
         } else {
@@ -227,23 +233,29 @@ impl Runner {
                     let is_unlocked = unlocked.as_ref().is_some_and(|rx| *rx.borrow());
                     if is_unlocked {
                         // Private mutes and waiting DMs need the key.
-                        let lists = self.fetch_lists(&bootstrap).await;
-                        self.apply_mutes(lists.mute_event.as_ref()).await;
+                        if let Some(lists) = self.fetch_lists(&bootstrap).await {
+                            self.apply_mutes(lists.mute_event.as_ref()).await;
+                        } else {
+                            self.apply_mutes(None).await;
+                        }
                         if dms {
                             self.process_pending_wraps(&want_tx).await;
                         }
                     }
                 }
                 _ = refresh.tick() => {
-                    let lists = self.fetch_lists(&bootstrap).await;
-                    self.apply_mutes(lists.mute_event.as_ref()).await;
+                    // A failed fetch keeps the mutes we have.
+                    if let Some(lists) = self.fetch_lists(&bootstrap).await {
+                        self.apply_mutes(lists.mute_event.as_ref()).await;
+                    }
+                    let _ = self.store.prune_orphans(&self.me_hex);
                     self.emit_status(true).await;
                 }
             }
         }
     }
 
-    async fn fetch_lists(&self, bootstrap: &[RelayUrl]) -> Lists {
+    async fn fetch_lists(&self, bootstrap: &[RelayUrl]) -> Option<Lists> {
         let filter = Filter::new().author(self.me).kinds([
             Kind::RelayList,
             Kind::Custom(10050),
@@ -262,9 +274,10 @@ impl Runner {
             Ok(e) => e,
             Err(e) => {
                 self.status.write().await.error = Some(format!("couldn't reach relays: {e}"));
-                return Lists::default();
+                return None;
             }
         };
+        self.status.write().await.error = None;
         let newest = |kind: Kind| {
             events
                 .iter()
@@ -273,10 +286,14 @@ impl Runner {
                 .cloned()
         };
         let mut lists = Lists::default();
+        let mut write = Vec::new();
         if let Some(ev) = newest(Kind::RelayList) {
             for (url, meta) in nip65::extract_relay_list(&ev) {
                 if meta.is_none() || meta == Some(RelayMetadata::Read) {
-                    lists.read.push(url);
+                    lists.read.push(url.clone());
+                }
+                if meta.is_none() || meta == Some(RelayMetadata::Write) {
+                    write.push(url);
                 }
             }
         }
@@ -291,12 +308,49 @@ impl Runner {
             }
         }
         lists.mute_event = newest(Kind::MuteList);
-        lists
+        // Your mute list lives on your own (write) relays too.
+        if !write.is_empty() {
+            for r in &write {
+                let _ = self.client.add_relay(r).await;
+            }
+            self.client.connect().and_wait(Duration::from_secs(3)).await;
+            let f = Filter::new().author(self.me).kind(Kind::MuteList).limit(1);
+            let targets: Vec<(RelayUrl, Vec<Filter>)> =
+                write.iter().map(|r| (r.clone(), vec![f.clone()])).collect();
+            if let Ok(found) = self
+                .client
+                .fetch_events(targets)
+                .timeout(FETCH_TIMEOUT)
+                .await
+                && let Some(ev) = found
+                    .iter()
+                    .filter(|e| e.pubkey == self.me && e.kind == Kind::MuteList)
+                    .max_by_key(|e| e.created_at)
+                && lists
+                    .mute_event
+                    .as_ref()
+                    .is_none_or(|m| ev.created_at > m.created_at)
+            {
+                lists.mute_event = Some(ev.clone());
+            }
+        }
+        Some(lists)
     }
 
     /// Public `p` tags, plus the private ones when the key is available,
     /// plus Opal's own block list.
+    /// Apply the newest mute list seen (a missing or older one never
+    /// replaces it), its private entries when the key is available (the last
+    /// decrypted set otherwise), plus Opal's own block list.
     async fn apply_mutes(&mut self, ev: Option<&Event>) {
+        if let Some(ev) = ev
+            && self
+                .mute_event
+                .as_ref()
+                .is_none_or(|m| ev.created_at >= m.created_at)
+        {
+            self.mute_event = Some(ev.clone());
+        }
         let mut muted: HashSet<String> = self
             .cfg
             .blocked
@@ -304,20 +358,37 @@ impl Runner {
             .filter_map(|b| PublicKey::parse(b).ok())
             .map(|pk| pk.to_hex())
             .collect();
-        if let Some(ev) = ev {
+        if let Some(ev) = self.mute_event.clone() {
             muted.extend(p_tags(ev.tags.iter().map(|t| t.as_slice().to_vec())));
-            if !ev.content.is_empty()
-                && let Some(keys) = self.keys().await
-            {
-                let plain = if ev.content.contains("?iv=") {
-                    nip04::decrypt(keys.secret_key(), &self.me, &ev.content).ok()
-                } else {
-                    nip44::decrypt(keys.secret_key(), &self.me, &ev.content).ok()
+            if !ev.content.is_empty() {
+                let cached = self
+                    .private_mutes
+                    .as_ref()
+                    .filter(|(id, _)| *id == ev.id)
+                    .map(|(_, set)| set.clone());
+                let private = match cached {
+                    Some(set) => Some(set),
+                    None => match self.keys().await {
+                        Some(keys) => {
+                            let plain = if ev.content.contains("?iv=") {
+                                nip04::decrypt(keys.secret_key(), &self.me, &ev.content).ok()
+                            } else {
+                                nip44::decrypt(keys.secret_key(), &self.me, &ev.content).ok()
+                            };
+                            let set: Option<HashSet<String>> = plain
+                                .and_then(|p| serde_json::from_str::<Vec<Vec<String>>>(&p).ok())
+                                .map(|tags| p_tags(tags.into_iter()).into_iter().collect());
+                            if let Some(set) = &set {
+                                self.private_mutes = Some((ev.id, set.clone()));
+                            }
+                            set
+                        }
+                        // Locked and never decrypted: keep what we had.
+                        None => self.private_mutes.as_ref().map(|(_, s)| s.clone()),
+                    },
                 };
-                if let Some(tags) =
-                    plain.and_then(|p| serde_json::from_str::<Vec<Vec<String>>>(&p).ok())
-                {
-                    muted.extend(p_tags(tags.into_iter()));
+                if let Some(p) = private {
+                    muted.extend(p);
                 }
             }
         }
@@ -421,25 +492,32 @@ impl Runner {
         if event.verify().is_err() {
             return;
         }
+        let now = Timestamp::now().as_secs();
+        // Far-future events would sit on top and stay unread forever.
+        if event.created_at.as_secs() > now.saturating_add(600) {
+            return;
+        }
         let Some(mut n) = classify(&event, &self.me) else {
             return;
         };
+        if self.muted.contains(&event.pubkey.to_hex()) {
+            return;
+        }
         if self.muted.contains(&n.author) || !self.type_enabled(n.ntype) {
             return;
         }
         n.relay = Some(relay.to_string());
-        let now = Timestamp::now().as_secs();
         if !self.store.insert(&self.me_hex, &n, now).unwrap_or(false) {
             return;
         }
-        if n.created_at <= now + 60 {
+        if n.created_at <= now.saturating_add(60) {
             let _ = self.store.set_last_seen(&self.me_hex, n.created_at);
         }
         let _ = want.send(Want::Profile(n.author.clone()));
         if let Some(r) = &n.ref_id {
             let _ = want.send(Want::Event(r.clone()));
         }
-        let fresh = n.created_at + 120 >= self.started;
+        let fresh = n.created_at.saturating_add(120) >= self.started;
         let _ = self.events.send(NotifyEvent::New {
             notification: n,
             fresh,
@@ -488,7 +566,9 @@ impl Runner {
             ntype: NotifType::Dm,
             kind: rumor.kind.as_u16(),
             author: sender.clone(),
-            created_at: rumor.created_at.as_secs(),
+            // The rumor's time is chosen by the sender and hidden from relays;
+            // never let it be later than when the message actually arrived.
+            created_at: rumor.created_at.as_secs().min(received),
             detail,
             ref_id: None,
             sats: None,
@@ -503,7 +583,8 @@ impl Runner {
             return;
         }
         let _ = want.send(Want::Profile(sender));
-        let fresh = received + 120 >= self.started && n.created_at + 600 >= self.started;
+        let fresh = received.saturating_add(120) >= self.started
+            && n.created_at.saturating_add(600) >= self.started;
         let _ = self.events.send(NotifyEvent::New {
             notification: n,
             fresh,
@@ -640,10 +721,12 @@ pub fn parse_profile(content: &str) -> Profile {
             .map(String::from)
     };
     Profile {
-        name: s("name"),
-        display_name: s("display_name").or_else(|| s("displayName")),
-        picture: s("picture").filter(|p| p.starts_with("https://")),
-        nip05: s("nip05"),
+        name: s("name").map(|v| v.chars().take(64).collect()),
+        display_name: s("display_name")
+            .or_else(|| s("displayName"))
+            .map(|v| v.chars().take(64).collect()),
+        picture: s("picture").filter(|p| p.starts_with("https://") && p.len() < 2048),
+        nip05: s("nip05").map(|v| v.chars().take(100).collect()),
         about: None,
     }
 }

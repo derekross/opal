@@ -80,10 +80,15 @@ pub fn classify(ev: &Event, me: &PublicKey) -> Option<Notification> {
         1111 => NotifType::Reply,
         _ => return None,
     };
-    // Your own activity isn't news (zap receipts are signed by the LNURL
-    // server, so check the zapper for those).
+    // It has to be addressed to you.
+    if !ev.tags.public_keys().any(|pk| pk == *me) {
+        return None;
+    }
+    // Your own activity isn't news. Zap receipts are signed by the LNURL
+    // server; the zapper is whoever signed the zap request inside, which
+    // must check out or the "zap" is ignored.
     let author = match ntype {
-        NotifType::Zap => zap_sender(ev).unwrap_or(ev.pubkey),
+        NotifType::Zap => valid_zap_sender(ev, me)?,
         _ => ev.pubkey,
     };
     if author == *me {
@@ -169,14 +174,45 @@ fn zap_request(ev: &Event) -> Option<serde_json::Value> {
         .tags
         .iter()
         .find(|t| t.as_slice().first().map(String::as_str) == Some("description"))
-        .and_then(|t| t.as_slice().get(1).cloned())
-        .unwrap_or_else(|| ev.content.clone());
+        .and_then(|t| t.as_slice().get(1).cloned())?;
     serde_json::from_str(&desc).ok()
 }
 
-fn zap_sender(ev: &Event) -> Option<PublicKey> {
-    let req = zap_request(ev)?;
-    PublicKey::from_hex(req.get("pubkey")?.as_str()?).ok()
+/// NIP-57 checks we can do without contacting the recipient's wallet: the
+/// embedded zap request is a validly signed kind 9734, it is for you, and
+/// its amount (when given) matches the invoice. Otherwise anyone could
+/// publish "someone zapped you a million sats".
+fn valid_zap_sender(ev: &Event, me: &PublicKey) -> Option<PublicKey> {
+    let desc = ev
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("description"))
+        .and_then(|t| t.as_slice().get(1).cloned())?;
+    let req = Event::from_json(&desc).ok()?;
+    if req.kind != Kind::ZapRequest || req.verify().is_err() {
+        return None;
+    }
+    if !req.tags.public_keys().any(|pk| pk == *me) {
+        return None;
+    }
+    let requested_msats = req.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        (s.first().map(String::as_str) == Some("amount"))
+            .then(|| s.get(1)?.parse::<u64>().ok())
+            .flatten()
+    });
+    if let Some(msats) = requested_msats {
+        let invoiced = ev.tags.iter().find_map(|t| {
+            let s = t.as_slice();
+            (s.first().map(String::as_str) == Some("bolt11"))
+                .then(|| s.get(1).and_then(|b| bolt11_sats(b)))
+                .flatten()
+        });
+        if invoiced.is_some_and(|sats| sats != msats / 1000) {
+            return None;
+        }
+    }
+    Some(req.pubkey)
 }
 
 fn zap_message(ev: &Event) -> String {
@@ -398,6 +434,51 @@ mod tests {
         assert_eq!(n.author, zapper.public_key().to_hex());
         assert_eq!(n.sats, Some(21));
         assert_eq!(n.detail, "great talk");
+    }
+
+    #[test]
+    fn forged_zaps_are_ignored() {
+        let me = Keys::generate().public_key();
+        let someone = Keys::generate();
+        let server = Keys::generate();
+        let receipt = |desc: String, bolt11: &str| {
+            event(
+                &server,
+                9735,
+                "",
+                vec![
+                    vec!["p", &me.to_hex()],
+                    vec!["bolt11", bolt11],
+                    vec!["description", &desc],
+                ],
+            )
+        };
+        // Request for someone else.
+        let other = Keys::generate().public_key();
+        let req = event(&someone, 9734, "", vec![vec!["p", &other.to_hex()]]);
+        assert!(classify(&receipt(req.as_json(), "lnbc210n1x"), &me).is_none());
+        // Tampered request (signature no longer matches).
+        let req = event(&someone, 9734, "hi", vec![vec!["p", &me.to_hex()]]);
+        let tampered = req.as_json().replace("\"hi\"", "\"send me your seed\"");
+        assert!(classify(&receipt(tampered, "lnbc210n1x"), &me).is_none());
+        // Asked for 21 sats, invoice says 1,000,000.
+        let req = event(
+            &someone,
+            9734,
+            "",
+            vec![vec!["p", &me.to_hex()], vec!["amount", "21000"]],
+        );
+        assert!(classify(&receipt(req.as_json(), "lnbc10m1x"), &me).is_none());
+        // Not a zap request at all.
+        let note = event(&someone, 1, "", vec![vec!["p", &me.to_hex()]]);
+        assert!(classify(&receipt(note.as_json(), "lnbc210n1x"), &me).is_none());
+    }
+
+    #[test]
+    fn events_not_addressed_to_me_are_ignored() {
+        let me = Keys::generate().public_key();
+        let ev = event(&Keys::generate(), 1, "hello", vec![]);
+        assert!(classify(&ev, &me).is_none());
     }
 
     #[test]

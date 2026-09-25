@@ -88,6 +88,39 @@ Item {
     sock.flush()
   }
 
+  // A change the daemon only makes with the Opal passphrase (full trust,
+  // turning auto-lock off, removing an account…). The panel shows a card
+  // asking for it, then retries with it.
+  property var guarded: null
+  property string guardError: ""
+
+  function runGuarded(method, params, onOk, why) {
+    call(method, params, function(err, result) {
+      if (!err) { if (onOk) onOk(result); return }
+      if (err.indexOf("passphrase") !== -1) {
+        root.guardError = ""
+        root.guarded = { method: method, params: params || {}, onOk: onOk, why: why || "Confirm with your Opal passphrase" }
+      } else {
+        root.message(err, true)
+      }
+    })
+  }
+
+  function confirmGuarded(passphrase) {
+    var g = guarded
+    if (!g) return
+    var p = Object.assign({}, g.params)
+    p.passphrase = passphrase
+    call(g.method, p, function(err, result) {
+      if (err) { root.guardError = err; return }
+      root.guarded = null
+      root.guardError = ""
+      if (g.onOk) g.onOk(result)
+    })
+  }
+
+  function cancelGuarded() { guarded = null; guardError = "" }
+
   // call() with a toast on error and an optional success callback.
   function run(method, params, onOk) {
     call(method, params, function(err, result) {

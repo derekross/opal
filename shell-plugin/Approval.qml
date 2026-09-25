@@ -42,6 +42,8 @@ Item {
   function open(payloadJson) {
     opened = true
     reset()
+    armed = mode === "unlock"
+    armTimer.restart()
     Qt.callLater(focusDefault)
   }
   function close() { opened = false }
@@ -59,19 +61,37 @@ Item {
     error = ""
     busy = false
     policy = svc && svc.config.signer ? (svc.config.signer.default_policy || "basic") : "basic"
-    var g = {}
-    if (offer) for (var i = 0; i < offer.perms.length; i++) g[offer.perms[i].perm] = true
-    granted = g
+    if (policy === "full-trust") policy = "basic"
+    // Nothing is granted unless you tick it.
+    granted = ({})
   }
 
-  // Close once nothing is left to decide.
-  onModeChanged: {
-    if (mode === "none" && opened) dismiss()
-    else { reset(); Qt.callLater(focusDefault) }
+  // What's on screen. Whenever it changes (a new request, another app's
+  // request taking its place), every choice resets and the buttons stay
+  // disabled for a moment, so a click meant for one thing can't land on
+  // another.
+  readonly property string shownId: mode === "offer" ? "o:" + offer.id
+    : mode === "prompt" ? "p:" + prompt.id
+    : mode
+  property bool armed: false
+  onShownIdChanged: {
+    if (mode === "none") {
+      if (opened) dismiss()
+      return
+    }
+    reset()
+    armed = mode === "unlock"
+    armTimer.restart()
+    Qt.callLater(focusDefault)
+  }
+  Timer {
+    id: armTimer
+    interval: 900
+    onTriggered: root.armed = true
   }
 
   function answer(allow) {
-    if (!prompt || busy) return
+    if (!prompt || busy || (allow && !armed)) return
     busy = true
     svc.call("prompts.answer", { id: prompt.id, allow: allow, remember: remember }, function(err) {
       root.busy = false
@@ -80,7 +100,7 @@ Item {
     })
   }
   function acceptOffer() {
-    if (!offer || busy) return
+    if (!offer || busy || !armed) return
     busy = true
     var grant = []
     for (var k in granted) if (granted[k]) grant.push(k)
@@ -113,6 +133,28 @@ Item {
     return c.length > 600 ? c.slice(0, 600) + "…" : c
   }
   readonly property string rawJson: prompt && prompt.event ? JSON.stringify(prompt.event, null, 2) : ""
+
+  readonly property string keyTags: {
+    if (!prompt || !prompt.event) return ""
+    var want = ["u", "method", "t", "p", "e", "relay", "expiration", "challenge"]
+    var lines = []
+    var tags = prompt.event.tags || []
+    for (var i = 0; i < tags.length && lines.length < 8; i++) {
+      var t = tags[i]
+      if (t.length > 1 && want.indexOf(t[0]) !== -1) {
+        var v = String(t[1])
+        lines.push(t[0] + ": " + (v.length > 80 ? v.slice(0, 80) + "…" : v))
+      }
+    }
+    return lines.join("\n")
+  }
+  readonly property string dateWarning: {
+    if (!prompt || !prompt.event) return ""
+    var d = prompt.event.created_at - Math.floor(Date.now() / 1000)
+    if (Math.abs(d) < 600) return ""
+    var h = Math.round(Math.abs(d) / 360) / 10
+    return "Dated " + h + " hours " + (d > 0 ? "in the future" : "in the past") + " (" + U.clock(prompt.event.created_at) + ")."
+  }
 
   PanelWindow {
     id: window
@@ -172,14 +214,15 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               size: Style.space(36)
               foreground: root.foreground
-              picture: root.mode === "offer" ? (root.offer.image || "")
-                : root.mode === "prompt" ? (root.prompt.app_image || "") : ""
+              // App images are the app's own claim; don't fetch them here.
+              picture: ""
             }
             Column {
               width: parent.width - Style.space(46)
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 wrapMode: Text.Wrap
                 color: root.foreground
@@ -196,6 +239,7 @@ Item {
                 }
               }
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 wrapMode: Text.Wrap
                 color: root.dim
@@ -206,7 +250,8 @@ Item {
                   case "unlock":
                     return root.svc.unlockRequest ? root.svc.unlockRequest.app_name + " is waiting for your signature" : "Requests are waiting"
                   case "offer":
-                    return (root.offer.url || "") + (root.offer.url ? " · " : "") + root.offer.relays.join(", ")
+                    return (root.offer.url ? root.offer.url + " (as the app claims) · " : "Unverified app · ")
+                      + root.offer.relays.join(", ")
                   case "prompt":
                     var n = root.svc.prompts.length
                     return (root.prompt.app_url || "") + (n > 1 ? "  ·  1 of " + n : "")
@@ -237,6 +282,7 @@ Item {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.Wrap
               color: root.foreground
@@ -254,7 +300,7 @@ Item {
             }
             PanelSectionHeader {
               visible: root.offer && root.offer.perms.length > 0
-              text: "IT ASKS TO ALWAYS ALLOW"
+              text: "IT ASKS TO ALWAYS ALLOW (TICK WHAT YOU AGREE TO)"
               foreground: root.dim
             }
             Repeater {
@@ -282,6 +328,7 @@ Item {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.Wrap
               color: root.foreground
@@ -290,6 +337,7 @@ Item {
               text: root.prompt ? U.describe(root.prompt.method, root.prompt.kind_label) : ""
             }
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: !!root.prompt && !!root.prompt.counterparty
               wrapMode: Text.Wrap
@@ -315,6 +363,7 @@ Item {
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 Text {
+                  textFormat: Text.PlainText
                   id: previewText
                   width: parent.width
                   wrapMode: Text.WrapAnywhere
@@ -330,6 +379,7 @@ Item {
               spacing: Style.space(8)
               visible: !!root.prompt && !!root.prompt.event
               Text {
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 color: root.dim
                 font.family: Style.font.family
@@ -343,10 +393,48 @@ Item {
               }
             }
 
+            // Tags that decide what this does (where an auth token is for,
+            // who a note tags…), and a warning for odd dates.
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              visible: text !== ""
+              wrapMode: Text.WrapAnywhere
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              text: root.keyTags
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              visible: text !== ""
+              wrapMode: Text.Wrap
+              color: root.urgent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              text: root.dateWarning
+            }
+
             PanelSectionHeader { text: "REMEMBER THIS ANSWER"; foreground: root.dim }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              visible: !!root.prompt && root.remember !== "once"
+                && (root.prompt.method === "nip04_decrypt" || root.prompt.method === "nip44_decrypt"
+                    || root.prompt.method === "nip04_encrypt" || root.prompt.method === "nip44_encrypt")
+              wrapMode: Text.Wrap
+              color: root.urgent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              text: "A remembered answer covers every conversation, not just this one."
+            }
             ButtonGroup {
               width: parent.width
-              options: U.rememberOptions
+              // Sensitive requests can't be remembered for long.
+              options: root.prompt && root.prompt.sensitive
+                ? U.rememberOptions.filter(function(o) { return ["once", "5m", "1h"].indexOf(o.value) !== -1 })
+                : U.rememberOptions
               value: root.remember
               foreground: root.foreground
               onChanged: function(v) { root.remember = v }
@@ -354,6 +442,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: root.error !== ""
             wrapMode: Text.Wrap
@@ -387,7 +476,8 @@ Item {
               iconText: root.mode === "unlock" ? "󰿆" : "󰄬"
               iconSpinning: root.busy
               bordered: true
-              active: true
+              active: root.armed
+              enabled: root.armed
               foreground: root.foreground
               onClicked: {
                 if (root.mode === "unlock") root.unlock()

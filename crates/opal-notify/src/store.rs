@@ -56,6 +56,9 @@ const MIGRATIONS: &[&str] = &[r#"
 
 /// Keep this many notifications per account.
 const KEEP: i64 = 500;
+/// Gift wraps waiting for an unlock: at most this many, this big.
+const MAX_PENDING_WRAPS: i64 = 1000;
+const MAX_WRAP_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StoredNotification {
@@ -306,11 +309,37 @@ impl NotifyStore {
         })
     }
 
+    /// Keep a gift wrap for when the key is available. Anyone can send
+    /// these, so size and count are capped (oldest dropped).
     pub fn add_pending_wrap(&self, account: &str, id: &str, json: &str, now: u64) -> Result<()> {
+        if json.len() > MAX_WRAP_BYTES {
+            return Ok(());
+        }
         self.db.with(|c| {
             c.execute(
                 "INSERT OR IGNORE INTO pending_wraps (id, account, event_json, received_at) VALUES (?1, ?2, ?3, ?4)",
                 params![id, account, json, now as i64],
+            )?;
+            c.execute(
+                "DELETE FROM pending_wraps WHERE account = ?1 AND id NOT IN (
+                   SELECT id FROM pending_wraps WHERE account = ?1
+                   ORDER BY received_at DESC LIMIT ?2)",
+                params![account, MAX_PENDING_WRAPS],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Drop cached profiles and referenced notes no notification needs.
+    pub fn prune_orphans(&self, me: &str) -> Result<()> {
+        self.db.with(|c| {
+            c.execute(
+                "DELETE FROM ref_events WHERE id NOT IN (SELECT ref_id FROM notifications WHERE ref_id IS NOT NULL)",
+                [],
+            )?;
+            c.execute(
+                "DELETE FROM profile_cache WHERE pubkey != ?1 AND pubkey NOT IN (SELECT author FROM notifications)",
+                [me],
             )
             .map(|_| ())
         })

@@ -37,6 +37,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Decrypted keys live in this process: no core dumps (which any process
+    // of this user could read) and no /proc/<pid>/mem access from the same
+    // user. The unit also sets LimitCORE=0.
+    if let Err(e) =
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+    {
+        eprintln!("warning: could not disable core dumps: {e}");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("OPAL_LOG")

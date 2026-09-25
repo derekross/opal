@@ -1,6 +1,5 @@
 //! Daemon state shared by the IPC server and background tasks.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -38,7 +37,11 @@ pub struct App {
     /// The NIP-46 signer has connected to its relays at least once.
     pub signer_started: AtomicBool,
     /// `nostrconnect://` URIs handed to us (xdg handler, CLI) awaiting the UI.
-    pub offers: Mutex<HashMap<String, NostrConnectUri>>,
+    /// (client pubkey, arrival order, uri); kept in arrival order.
+    pub offers: Mutex<Vec<(String, u64, NostrConnectUri)>>,
+    offer_seq: std::sync::atomic::AtomicU64,
+    /// Serializes module (re)starts so concurrent changes settle correctly.
+    pub reconcile_lock: Mutex<()>,
     pub notify_store: NotifyStore,
     pub status_store: StatusStore,
     /// The running status module and what it was started with.
@@ -102,7 +105,9 @@ impl App {
             last_activity: Mutex::new(Instant::now()),
             online: AtomicBool::new(true),
             signer_started: AtomicBool::new(false),
-            offers: Mutex::new(HashMap::new()),
+            offers: Mutex::new(Vec::new()),
+            offer_seq: std::sync::atomic::AtomicU64::new(1),
+            reconcile_lock: Mutex::new(()),
             notify_store,
             notify: Mutex::new(None),
             status_store,
@@ -110,6 +115,10 @@ impl App {
             bunker: Mutex::new(None),
             status_blocked: Mutex::new(None),
         }))
+    }
+
+    pub fn next_offer_seq(&self) -> u64 {
+        self.offer_seq.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn emit(&self, event: &str, data: Value) {
@@ -155,7 +164,8 @@ impl App {
     }
 
     pub async fn status(&self) -> Value {
-        let cfg = self.config.read().await;
+        // A snapshot: hold no lock while awaiting the others below.
+        let cfg = self.config.read().await.clone();
         let current = self.accounts.current().ok().flatten();
         // Only accounts whose key is actually in the keyring.
         let in_keyring: Vec<String> = self

@@ -15,20 +15,25 @@ Column {
   readonly property var modules: cfg.modules || ({})
 
   property bool changingPass: false
+  onVisibleChanged: if (!visible) {
+    oldPass.text = ""; newPass.text = ""; newPass2.text = ""; changingPass = false; passError = ""
+    if (bunkerField) bunkerField.text = ""
+  }
   property string passError: ""
 
   spacing: Style.space(10)
 
   function set(patch) {
-    svc.run("config.set", patch, function(r) { root.svc.config = r })
+    svc.runGuarded("config.set", patch, function(r) { root.svc.config = r },
+      "This makes Opal lock less often. Confirm with your Opal passphrase.")
   }
 
   function changePassphrase() {
     passError = ""
-    if (newPass.text.length < 8) { passError = "Use at least 8 characters."; return }
+    if (newPass.text.length < 10) { passError = "Use at least 10 characters (a few random words work well)."; return }
     if (newPass.text !== newPass2.text) { passError = "The new passphrases don't match."; return }
     svc.call("passphrase.change", { old: oldPass.text, new: newPass.text }, function(err) {
-      if (err) { root.passError = err; return }
+      if (err) { root.passError = err; oldPass.text = ""; return }
       oldPass.text = ""; newPass.text = ""; newPass2.text = ""
       root.changingPass = false
       root.svc.message("Passphrase changed", false)
@@ -36,6 +41,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.watching
     wrapMode: Text.Wrap
@@ -82,6 +88,7 @@ Column {
     }
   }
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.external
     elide: Text.ElideMiddle
@@ -113,6 +120,7 @@ Column {
     }
   }
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.bunkerError !== ""
     wrapMode: Text.Wrap
@@ -405,6 +413,7 @@ Column {
     TextField { id: newPass; width: parent.width; password: true; placeholderText: "New passphrase"; foreground: root.foreground }
     TextField { id: newPass2; width: parent.width; password: true; placeholderText: "Repeat new passphrase"; foreground: root.foreground; onAccepted: root.changePassphrase() }
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: root.passError !== ""
       wrapMode: Text.Wrap
@@ -421,6 +430,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     wrapMode: Text.Wrap
     color: root.dim

@@ -16,6 +16,11 @@ Column {
 
   spacing: Style.space(10)
 
+  onVisibleChanged: if (!visible) {
+    secret.text = ""; ncPass.text = ""; pass1.text = ""; pass2.text = ""; watchField.text = ""; error = ""
+  }
+  onModeChanged: { secret.text = ""; ncPass.text = ""; watchField.text = ""; error = "" }
+
   function submit() {
     error = ""
     if (mode === "watch") {
@@ -31,7 +36,7 @@ Column {
       return
     }
     if (mode === "import" && secret.text.trim() === "") { error = "Paste your key first."; return }
-    if (pass1.text.length < 8) { error = "Use a passphrase of at least 8 characters."; return }
+    if (pass1.text.length < 10) { error = "Use at least 10 characters (a few random words work well)."; return }
     if (pass1.text !== pass2.text) { error = "The passphrases don't match."; return }
     busy = true
     var params = { passphrase: pass1.text, nickname: nickname.text }
@@ -47,6 +52,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     wrapMode: Text.Wrap
     color: root.foreground
@@ -68,6 +74,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.mode === "watch"
     wrapMode: Text.Wrap
@@ -119,7 +126,7 @@ Column {
     visible: root.mode !== "watch"
     width: parent.width
     password: true
-    placeholderText: "Passphrase (8+ characters)"
+    placeholderText: "Passphrase (a few random words)"
     foreground: root.foreground
   }
   TextField {
@@ -133,6 +140,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.error !== ""
     wrapMode: Text.Wrap
