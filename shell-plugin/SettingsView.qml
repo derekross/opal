@@ -48,6 +48,8 @@ Column {
       root.svc.refreshConfig()
     })
   }
+  // Signer settings only mean something with a key stored in Opal.
+  readonly property bool hasKey: !!root.svc && root.svc.hasAccounts
   readonly property bool watching: !!root.cfg.identity && root.cfg.identity.mode === "read-only"
   readonly property bool external: !!root.cfg.identity && root.cfg.identity.mode === "external"
   property string idMode: watching ? "read-only" : external ? "external" : "local"
@@ -163,9 +165,10 @@ Column {
     text: root.watchError
   }
 
-  PanelSectionHeader { text: "LOCK AFTER"; foreground: root.dim }
+  PanelSectionHeader { text: "LOCK AFTER"; foreground: root.dim; visible: root.hasKey }
   ButtonGroup {
     width: parent.width
+    visible: root.hasKey
     options: [
       { value: "5", label: "5m" },
       { value: "15", label: "15m" },
@@ -183,6 +186,7 @@ Column {
 
   Toggle {
     width: parent.width
+    visible: root.hasKey
     label: "Lock with the screen"
     description: "Also locks before suspend"
     checked: root.signer.lock_on_screen_lock !== false
@@ -190,9 +194,10 @@ Column {
     onClicked: root.set({ signer: { lock_on_screen_lock: !checked } })
   }
 
-  PanelSectionHeader { text: "NEW APPS START WITH"; foreground: root.dim }
+  PanelSectionHeader { text: "NEW APPS START WITH"; foreground: root.dim; visible: root.hasKey }
   ButtonGroup {
     width: parent.width
+    visible: root.hasKey
     options: [
       { value: "basic", label: "Basic" },
       { value: "manual", label: "Ask for everything" }
@@ -204,6 +209,7 @@ Column {
 
   Toggle {
     width: parent.width
+    visible: root.hasKey
     label: "Privacy mode"
     description: "Don't keep an activity history (applies after a restart)"
     checked: root.signer.privacy_mode === true
@@ -213,6 +219,7 @@ Column {
 
   Toggle {
     width: parent.width
+    visible: root.hasKey
     label: "Connected to relays"
     description: "Turn off to stop answering every app at once"
     checked: root.svc ? root.svc.online : true
@@ -223,6 +230,7 @@ Column {
   PanelSectionHeader { text: "MODULES"; foreground: root.dim }
   Toggle {
     width: parent.width
+    visible: root.hasKey
     label: "Signer"
     description: "NIP-46 remote signing for your apps"
     checked: root.modules.signer !== false
@@ -257,8 +265,8 @@ Column {
           { key: "reposts", label: "Reposts" },
           { key: "reactions", label: "Reactions" },
           { key: "zaps", label: "Zaps" },
-          { key: "dms", label: "DMs" }
-        ]
+          { key: "dms", label: "DMs", needsKey: true }
+        ].filter(function(o) { return !o.needsKey || root.hasKey })
         delegate: Button {
           required property var modelData
           text: modelData.label
@@ -290,6 +298,7 @@ Column {
     }
     Toggle {
       width: parent.width - parent.leftPadding
+      visible: root.hasKey
       label: "Show DM text in popups"
       description: "Off keeps message text out of notifications and the database"
       checked: parent.n.dm_previews === true
@@ -423,9 +432,9 @@ Column {
     }
   }
 
-  PanelSectionHeader { text: "PASSPHRASE"; foreground: root.dim }
+  PanelSectionHeader { text: "PASSPHRASE"; foreground: root.dim; visible: root.hasKey }
   Button {
-    visible: !root.changingPass
+    visible: root.hasKey && !root.changingPass
     text: "Change passphrase"
     iconText: "󰌆"
     bordered: true
@@ -434,7 +443,7 @@ Column {
   }
   Column {
     width: parent.width
-    visible: root.changingPass
+    visible: root.hasKey && root.changingPass
     spacing: Style.space(8)
     TextField { id: oldPass; width: parent.width; password: true; placeholderText: "Current passphrase"; foreground: root.foreground }
     TextField { id: newPass; width: parent.width; password: true; placeholderText: "New passphrase"; foreground: root.foreground }
@@ -461,6 +470,7 @@ Column {
     color: root.dim
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
+    visible: root.hasKey
     text: "Signer relays: " + (root.signer.relays || []).join(", ")
   }
 }

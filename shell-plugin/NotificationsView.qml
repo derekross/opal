@@ -75,7 +75,7 @@ Column {
       var s = root.st.status || {}
       var parts = [(s.read_relays || []).length + " relays"]
       if (s.muted) parts.push(s.muted + " muted")
-      parts.push(s.dms ? "DMs on" : "DMs need your local key")
+      if (root.svc && root.svc.hasAccounts) parts.push(s.dms ? "DMs on" : "DMs off")
       return parts.join(" · ")
     }
   }
@@ -87,7 +87,7 @@ Column {
       { value: "replies", label: "Replies" },
       { value: "zaps", label: "Zaps" },
       { value: "dms", label: "DMs" }
-    ]
+    ].filter(function(o) { return o.value !== "dms" || (!!root.svc && root.svc.hasAccounts) })
     value: root.filter
     foreground: root.foreground
     onChanged: function(v) { root.filter = v }
