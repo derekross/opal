@@ -45,6 +45,9 @@ Item {
   // Watching someone is read-only, so nothing that writes is offered then.
   readonly property bool canSign: (identity.mode === "external" && !!identity.npub)
     || (identity.mode !== "read-only" && identity.mode !== "external" && hasAccounts)
+  // DMs can only be read with the key of the profile in use stored in Opal
+  // (not a read-only profile, not an external signer).
+  readonly property bool canReadDms: hasAccounts && !readOnly && identity.mode !== "external"
   readonly property bool signerOn: !status.modules || status.modules.signer !== false
   readonly property bool statusOn: canSign && !!status.modules && status.modules.status === true
   property var notifyStatus: ({})

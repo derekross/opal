@@ -14,6 +14,11 @@ Column {
   readonly property color dim: Qt.darker(foreground, 1.55)
 
   property string filter: "all"
+  // Leave the DMs filter if it disappears.
+  Connections {
+    target: root.svc
+    function onCanReadDmsChanged() { if (!root.svc.canReadDms && root.filter === "dms") root.filter = "all" }
+  }
   property double nowMs: Date.now()
 
   spacing: Style.space(10)
@@ -22,6 +27,7 @@ Column {
 
   readonly property var items: {
     var all = svc ? svc.notifications : []
+    if (svc && !svc.canReadDms) all = all.filter(function(n) { return n.type !== "dm" })
     if (filter === "all") return all
     return all.filter(function(n) {
       if (filter === "replies") return n.type === "reply" || n.type === "mention"
@@ -75,7 +81,7 @@ Column {
       var s = root.st.status || {}
       var parts = [(s.read_relays || []).length + " relays"]
       if (s.muted) parts.push(s.muted + " muted")
-      if (root.svc && root.svc.hasAccounts) parts.push(s.dms ? "DMs on" : "DMs off")
+      if (root.svc && root.svc.canReadDms) parts.push(s.dms ? "DMs on" : "DMs off")
       return parts.join(" · ")
     }
   }
@@ -87,7 +93,7 @@ Column {
       { value: "replies", label: "Replies" },
       { value: "zaps", label: "Zaps" },
       { value: "dms", label: "DMs" }
-    ].filter(function(o) { return o.value !== "dms" || (!!root.svc && root.svc.hasAccounts) })
+    ].filter(function(o) { return o.value !== "dms" || (!!root.svc && root.svc.canReadDms) })
     value: root.filter
     foreground: root.foreground
     onChanged: function(v) { root.filter = v }

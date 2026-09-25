@@ -222,7 +222,7 @@ Column {
           { key: "reactions", label: "Reactions" },
           { key: "zaps", label: "Zaps" },
           { key: "dms", label: "DMs", needsKey: true }
-        ].filter(function(o) { return !o.needsKey || root.hasKey })
+        ].filter(function(o) { return !o.needsKey || (!!root.svc && root.svc.canReadDms) })
         delegate: Button {
           required property var modelData
           text: modelData.label
@@ -254,7 +254,7 @@ Column {
     }
     Toggle {
       width: parent.width - parent.leftPadding
-      visible: root.hasKey
+      visible: !!root.svc && root.svc.canReadDms
       label: "Show DM text in popups"
       description: "Off keeps message text out of notifications and the database"
       checked: parent.n.dm_previews === true
