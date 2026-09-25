@@ -1756,6 +1756,7 @@ dependencies = [
  "oo7",
  "reqwest",
  "rusqlite",
+ "rustls",
  "secrecy",
  "serde",
  "serde_json",

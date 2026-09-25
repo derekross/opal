@@ -190,11 +190,14 @@ impl App {
             .identity
             .npub
             .as_deref()
-            .filter(|_| cfg.identity.mode == opal_core::config::IdentityMode::ReadOnly)
+            // A saved read-only profile (in use or not); in external mode the
+            // npub belongs to the external signer instead.
+            .filter(|_| cfg.identity.mode != opal_core::config::IdentityMode::External)
             .and_then(|n| PublicKey::parse(n).ok())
             .map(|pk| {
                 let profile = self.notify_store.profile(&pk.to_hex()).ok().flatten().map(|(p, _)| p);
                 json!({
+                    "active": cfg.identity.mode == opal_core::config::IdentityMode::ReadOnly,
                     "npub": pk.to_bech32().ok(),
                     "nip05": cfg.identity.nip05,
                     "name": profile.as_ref().and_then(|p| p.display_name.clone().or_else(|| p.name.clone())),

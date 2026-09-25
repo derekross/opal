@@ -3,7 +3,8 @@ import qs.Commons
 import qs.Ui
 import "util.js" as U
 
-// Accounts: switch, add, back up, remove.
+// Profiles: your keys and a read-only (notifications only) profile, in one
+// list. Click one to use it; add, back up or delete from here.
 Column {
   id: root
   property var svc: null
@@ -20,29 +21,69 @@ Column {
   spacing: Style.space(10)
 
   readonly property var accounts: svc ? svc.accounts : []
-  readonly property var watched: svc && svc.readOnly ? (svc.status.watched || {}) : null
-  property bool confirmUnwatch: false
-  property bool addingWatch: false
-  property bool watchBusy: false
-  property string watchError: ""
+  readonly property bool readOnlyActive: !!svc && svc.readOnly
 
-  function watch() {
-    var who = watchField.text.trim()
-    if (who === "") { watchError = "Enter an npub or a NIP-05 address."; return }
-    watchBusy = true
-    watchError = ""
-    svc.call("identity.watch", { input: who }, function(err) {
-      root.watchBusy = false
-      if (err) { root.watchError = err; return }
-      watchField.text = ""
-      root.addingWatch = false
-      root.svc.refreshConfig()
-      root.svc.message("Watching " + who, false)
-    })
+  // One list: the read-only profile (if any) and every key.
+  readonly property var profiles: {
+    var out = []
+    var w = svc && svc.status ? svc.status.watched : null
+    if (w && w.npub) {
+      out.push({
+        readOnly: true,
+        id: "watched",
+        pubkey: "",
+        npub: w.npub,
+        label: w.name || "Read-only profile",
+        subtitle: w.nip05 || U.shortKey(w.npub),
+        picture: w.picture || "",
+        current: w.active === true
+      })
+    }
+    for (var i = 0; i < accounts.length; i++) {
+      var a = accounts[i]
+      out.push({
+        readOnly: false,
+        id: a.pubkey,
+        pubkey: a.pubkey,
+        npub: a.npub,
+        label: a.label,
+        subtitle: a.nip05 || U.shortKey(a.npub),
+        picture: a.picture || "",
+        current: a.current && !root.readOnlyActive
+      })
+    }
+    return out
+  }
+
+  function use(p) {
+    if (p.current) return
+    if (p.readOnly) svc.run("identity.use_watched", null, function() { root.svc.refreshConfig() })
+    else svc.run("accounts.select", { pubkey: p.pubkey }, function() { root.svc.refreshConfig() })
+  }
+
+  function remove(p) {
+    if (confirmRemove !== p.id) { confirmRemove = p.id; return }
+    confirmRemove = ""
+    if (p.readOnly) svc.run("identity.unwatch", null, function() { root.svc.refreshConfig() })
+    else svc.run("accounts.remove", { pubkey: p.pubkey })
   }
 
   function add() {
     error = ""
+    if (addMode === "read-only") {
+      var who = secret.text.trim()
+      if (who === "") { error = "Enter an npub or a NIP-05 address."; return }
+      busy = true
+      svc.call("identity.watch", { input: who }, function(err) {
+        root.busy = false
+        if (err) { root.error = err; return }
+        secret.text = ""
+        root.adding = false
+        root.svc.refreshConfig()
+        root.svc.message("Added a read-only profile", false)
+      })
+      return
+    }
     if (addMode === "import" && secret.text.trim() === "") { error = "Paste the key first."; return }
     if (pass.text === "") { error = "Enter your Opal passphrase."; return }
     busy = true
@@ -60,69 +101,8 @@ Column {
     })
   }
 
-  // Someone being watched (read-only).
-  PanelSectionHeader { visible: !!root.watched; text: "WATCHING"; foreground: root.dim }
-  CursorSurface {
-    width: root.width
-    visible: !!root.watched
-    foreground: root.foreground
-    implicitHeight: watchRow.implicitHeight + Style.spacing.xl
-    Row {
-      id: watchRow
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.leftMargin: Style.space(8)
-      anchors.rightMargin: Style.space(8)
-      anchors.verticalCenter: parent.verticalCenter
-      spacing: Style.space(10)
-      Avatar {
-        anchors.verticalCenter: parent.verticalCenter
-        size: Style.space(32)
-        picture: root.watched && root.watched.picture ? root.watched.picture : ""
-        foreground: root.foreground
-      }
-      Column {
-        width: parent.width - Style.space(42) - unwatchButton.width - Style.space(10)
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: Style.space(1)
-        Text {
-          width: parent.width
-          elide: Text.ElideRight
-          color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-          text: root.watched ? (root.watched.name || "Someone") + "  (read-only)" : ""
-        }
-        Text {
-          width: parent.width
-          elide: Text.ElideMiddle
-          color: root.dim
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          text: root.watched ? (root.watched.nip05 || U.shortKey(root.watched.npub)) : ""
-        }
-      }
-      Button {
-        id: unwatchButton
-        anchors.verticalCenter: parent.verticalCenter
-        text: root.confirmUnwatch ? "Click again" : "Stop watching"
-        bordered: true
-        foreground: root.urgent
-        onClicked: {
-          if (!root.confirmUnwatch) { root.confirmUnwatch = true; return }
-          root.confirmUnwatch = false
-          root.svc.run("identity.unwatch", null, function() {
-            root.svc.refreshConfig()
-            root.svc.message("Stopped watching", false)
-          })
-        }
-      }
-    }
-  }
-  PanelSectionHeader { visible: !!root.watched && root.accounts.length > 0; text: "YOUR KEYS"; foreground: root.dim }
-
   Repeater {
-    model: root.accounts
+    model: root.profiles
     delegate: CursorSurface {
       required property var modelData
       width: root.width
@@ -142,7 +122,7 @@ Column {
         Avatar {
           anchors.verticalCenter: parent.verticalCenter
           size: Style.space(32)
-          picture: modelData.picture || ""
+          picture: modelData.picture
           foreground: root.foreground
         }
         Column {
@@ -164,7 +144,7 @@ Column {
             color: root.dim
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
-            text: modelData.nip05 || U.shortKey(modelData.npub)
+            text: (modelData.readOnly ? "Read-only · notifications only · " : "") + modelData.subtitle
           }
         }
         Row {
@@ -177,6 +157,7 @@ Column {
             onClicked: root.svc.copy(modelData.npub, "npub copied")
           }
           PanelActionButton {
+            visible: !modelData.readOnly
             iconText: "󰌆"
             tooltipText: "Copy encrypted backup (ncryptsec)"
             onClicked: root.svc.run("accounts.export", { pubkey: modelData.pubkey }, function(r) {
@@ -185,13 +166,11 @@ Column {
           }
           PanelActionButton {
             iconText: "󰆴"
-            tooltipText: root.confirmRemove === modelData.pubkey ? "Click again to delete this account" : "Delete account"
+            tooltipText: root.confirmRemove === modelData.id
+              ? "Click again to remove this profile"
+              : (modelData.readOnly ? "Remove read-only profile" : "Delete account")
             hoverColor: root.urgent
-            onClicked: {
-              if (root.confirmRemove !== modelData.pubkey) { root.confirmRemove = modelData.pubkey; return }
-              root.confirmRemove = ""
-              root.svc.run("accounts.remove", { pubkey: modelData.pubkey })
-            }
+            onClicked: root.remove(modelData)
           }
         }
       }
@@ -199,7 +178,7 @@ Column {
         anchors.fill: parent
         anchors.rightMargin: actions.width + Style.space(8)
         cursorShape: Qt.PointingHandCursor
-        onClicked: if (!modelData.current) root.svc.run("accounts.select", { pubkey: modelData.pubkey })
+        onClicked: root.use(modelData)
       }
     }
   }
@@ -211,75 +190,18 @@ Column {
     color: root.urgent
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
-    text: "Deleting removes the key from this computer and disconnects its apps. Make sure you have a backup."
+    text: root.confirmRemove === "watched"
+      ? "Click the trash again to remove this read-only profile."
+      : "Deleting removes the key from this computer and disconnects its apps. Make sure you have a backup."
   }
 
-  Row {
-    spacing: Style.space(8)
-    visible: !root.adding && !root.addingWatch
-    Button {
-      text: "Add account"
-      iconText: "󰐕"
-      bordered: true
-      foreground: root.foreground
-      onClicked: root.adding = true
-    }
-    Button {
-      text: root.watched ? "Watch someone else" : "Watch someone"
-      iconText: "󰈈"
-      bordered: true
-      foreground: root.foreground
-      tooltipText: "Read-only: see anyone's notifications without their key"
-      onClicked: { root.addingWatch = true; Qt.callLater(function() { watchField.forceActiveFocus() }) }
-    }
-  }
-
-  // Watch someone (read-only profile).
-  Column {
-    width: parent.width
-    visible: root.addingWatch
-    spacing: Style.space(8)
-    Text {
-      width: parent.width
-      wrapMode: Text.Wrap
-      color: root.dim
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      text: "Read-only: see notifications for anyone, no key needed. Enter an npub or a NIP-05 address like you@example.com."
-    }
-    TextField {
-      id: watchField
-      width: parent.width
-      placeholderText: "npub1… or name@domain"
-      foreground: root.foreground
-      onAccepted: root.watch()
-      Keys.onEscapePressed: root.addingWatch = false
-    }
-    Text {
-      width: parent.width
-      visible: root.watchError !== ""
-      wrapMode: Text.Wrap
-      color: root.urgent
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      text: root.watchError
-    }
-    Row {
-      spacing: Style.space(8)
-      Button {
-        text: root.watchBusy ? "Looking up…" : "Watch"
-        iconSpinning: root.watchBusy
-        iconText: "󰈈"
-        bordered: true
-        foreground: root.foreground
-        onClicked: if (!root.watchBusy) root.watch()
-      }
-      Button {
-        text: "Cancel"
-        foreground: root.foreground
-        onClicked: { root.addingWatch = false; root.watchError = "" }
-      }
-    }
+  Button {
+    visible: !root.adding
+    text: "Add profile"
+    iconText: "󰐕"
+    bordered: true
+    foreground: root.foreground
+    onClicked: root.adding = true
   }
 
   Column {
@@ -290,20 +212,31 @@ Column {
     ButtonGroup {
       width: parent.width
       options: [
-        { value: "import", label: "Import" },
-        { value: "generate", label: "Create new" }
+        { value: "import", label: "Import key" },
+        { value: "generate", label: "New key" },
+        { value: "read-only", label: "Read-only", tooltip: "Notifications only, for an npub or NIP-05 address" }
       ]
       value: root.addMode
       foreground: root.foreground
-      onChanged: function(v) { root.addMode = v }
+      onChanged: function(v) { root.addMode = v; root.error = "" }
+    }
+    Text {
+      width: parent.width
+      visible: root.addMode === "read-only"
+      wrapMode: Text.Wrap
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: "See notifications for anyone, no key needed. Enter an npub or a NIP-05 address like you@example.com."
     }
     TextField {
       id: secret
       width: parent.width
-      visible: root.addMode === "import"
-      password: true
-      placeholderText: "nsec, ncryptsec or recovery phrase"
+      visible: root.addMode !== "generate"
+      password: root.addMode === "import"
+      placeholderText: root.addMode === "read-only" ? "npub1… or name@domain" : "nsec, ncryptsec or recovery phrase"
       foreground: root.foreground
+      onAccepted: if (root.addMode === "read-only") root.add()
     }
     TextField {
       id: ncPass
@@ -316,12 +249,14 @@ Column {
     TextField {
       id: nick
       width: parent.width
+      visible: root.addMode !== "read-only"
       placeholderText: "Nickname (optional)"
       foreground: root.foreground
     }
     TextField {
       id: pass
       width: parent.width
+      visible: root.addMode !== "read-only"
       password: true
       placeholderText: root.accounts.length === 0 ? "Choose an Opal passphrase (8+ characters)" : "Your Opal passphrase"
       foreground: root.foreground
@@ -339,9 +274,9 @@ Column {
     Row {
       spacing: Style.space(8)
       Button {
-        text: root.busy ? "Encrypting…" : "Add"
+        text: root.busy ? (root.addMode === "read-only" ? "Looking up…" : "Encrypting…") : "Add"
         iconSpinning: root.busy
-        iconText: "󰌆"
+        iconText: "󰐕"
         bordered: true
         foreground: root.foreground
         onClicked: if (!root.busy) root.add()

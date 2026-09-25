@@ -46,6 +46,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    opal_core::identity::ensure_crypto_provider();
     let config_path = args.config.clone().unwrap_or_else(paths::config_file);
     let config = Config::load_from(&config_path)?;
     let db = match &args.db {

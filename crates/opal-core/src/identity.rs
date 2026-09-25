@@ -97,7 +97,15 @@ fn resolved(pk: PublicKey, nip05: Option<String>, relays: Vec<String>) -> Resolv
     }
 }
 
+/// reqwest is built without its own TLS backend (so there's only one,
+/// shared with the relay connections); make sure rustls has it before the
+/// first HTTPS request, which may come before any wss:// connection.
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 async fn fetch(url: &str) -> Result<String> {
+    ensure_crypto_provider();
     let client = reqwest::Client::builder()
         // NIP-05: fetchers must ignore redirects.
         .redirect(reqwest::redirect::Policy::none())

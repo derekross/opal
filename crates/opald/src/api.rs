@@ -72,6 +72,32 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 bail!("unknown account");
             }
             app.accounts.set_current(&pk)?;
+            {
+                // Picking a key profile leaves read-only mode (the watched
+                // profile stays in the list).
+                let mut cfg = app.config.write().await;
+                if cfg.identity.mode == opal_core::config::IdentityMode::ReadOnly {
+                    cfg.identity.mode = opal_core::config::IdentityMode::Local;
+                    cfg.save_to(&app.config_path)?;
+                }
+            }
+            crate::modules::reconcile(app).await;
+            app.emit_state().await;
+            Ok(json!({"ok": true}))
+        }
+        "identity.use_watched" => {
+            // Switch to the read-only profile that's already saved.
+            {
+                let mut cfg = app.config.write().await;
+                if cfg.identity.npub.is_none()
+                    || cfg.identity.mode == opal_core::config::IdentityMode::External
+                {
+                    bail!("no read-only profile saved");
+                }
+                cfg.identity.mode = opal_core::config::IdentityMode::ReadOnly;
+                cfg.modules.notifications = true;
+                cfg.save_to(&app.config_path)?;
+            }
             crate::modules::reconcile(app).await;
             app.emit_state().await;
             Ok(json!({"ok": true}))
