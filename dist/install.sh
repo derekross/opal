@@ -3,8 +3,15 @@
 # (~/.local/bin), a systemd user service, the nostrconnect:// link handler,
 # and the Omarchy shell plugin.
 #
-#   ./dist/install.sh             build (release) and install everything
+#   ./dist/install.sh             build with cargo if Rust is installed,
+#                                 otherwise download the release binaries
+#   ./dist/install.sh --build     always build from source
+#   ./dist/install.sh --prebuilt  always download the release binaries
 #   ./dist/install.sh --no-build  install already-built binaries
+#
+# Release binaries are built by GitHub Actions from the tag matching this
+# checkout's version, and checked against the release's SHA256SUMS (and its
+# build attestation too, when the GitHub CLI is signed in).
 #
 # Run it again after `git pull` / `omarchy plugin update` to update.
 set -euo pipefail
@@ -16,6 +23,8 @@ UNITDIR="$HOME/.config/systemd/user"
 APPDIR="$HOME/.local/share/applications"
 PLUGINDIR="$HOME/.config/omarchy/plugins"
 PLUGIN_ID="$(jq -r .id manifest.json)"
+VERSION="$(jq -r .version manifest.json)"
+GITHUB_REPO="derekross/opal"
 PLUGIN_PATH="$PLUGINDIR/$PLUGIN_ID"
 
 ask() {
@@ -34,17 +43,51 @@ if [[ "$REPO" == "$(realpath -m "$PLUGIN_PATH")" ]]; then
 fi
 TARGET="${CARGO_TARGET_DIR:-$REPO/target}"
 
-if [[ "${1:-}" != "--no-build" ]]; then
-  command -v cargo >/dev/null || {
-    echo "Rust is needed to build Opal: sudo pacman -S --needed rustup && rustup default stable" >&2
-    exit 1
-  }
-  cargo build --release -p opald -p opal-cli
-fi
+MODE="${1:-auto}"
+case $MODE in
+  auto) command -v cargo >/dev/null && MODE=--build || MODE=--prebuilt ;;
+  --build | --prebuilt | --no-build) ;;
+  *) echo "Unknown option: $MODE (use --build, --prebuilt or --no-build)" >&2; exit 2 ;;
+esac
+
+download_release() {
+  local arch name base dir
+  arch="$(uname -m)"
+  [[ $arch == x86_64 || $arch == aarch64 ]] || { echo "No release build for $arch; install Rust to build Opal." >&2; exit 1; }
+  name="opal-v$VERSION-$arch-linux"
+  base="https://github.com/$GITHUB_REPO/releases/download/v$VERSION"
+  dir="${XDG_CACHE_HOME:-$HOME/.cache}/opal/release"
+  rm -rf "$dir" && mkdir -p "$dir"
+  echo "Downloading Opal v$VERSION ($arch)"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/$name.tar.gz" "$base/$name.tar.gz"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/SHA256SUMS" "$base/SHA256SUMS"
+  (cd "$dir" && grep -E "  $name\.tar\.gz\$" SHA256SUMS | sha256sum --check --status) \
+    || { echo "Checksum mismatch for $name.tar.gz; not installing it." >&2; exit 1; }
+  echo "  Checksum OK"
+  if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+    gh attestation verify "$dir/$name.tar.gz" --repo "$GITHUB_REPO" >/dev/null \
+      || { echo "Build attestation check failed; not installing it." >&2; exit 1; }
+    echo "  Built by GitHub Actions from $GITHUB_REPO (attestation verified)"
+  fi
+  tar -xzf "$dir/$name.tar.gz" -C "$dir"
+  BIN_SRC="$dir/$name"
+}
+
+BIN_SRC="$TARGET/release"
+case $MODE in
+  --build)
+    command -v cargo >/dev/null || {
+      echo "Rust is needed to build Opal: sudo pacman -S --needed rustup && rustup default stable" >&2
+      exit 1
+    }
+    cargo build --locked --release -p opald -p opal-cli
+    ;;
+  --prebuilt) download_release ;;
+esac
 
 echo "Installing binaries to $BINDIR"
-install -Dm755 "$TARGET/release/opald" "$BINDIR/opald"
-install -Dm755 "$TARGET/release/opal" "$BINDIR/opal"
+install -Dm755 "$BIN_SRC/opald" "$BINDIR/opald"
+install -Dm755 "$BIN_SRC/opal" "$BINDIR/opal"
 
 mkdir -p -m 700 "$HOME/.local/share/opal" "$HOME/.config/opal" "$HOME/.cache/opal"
 

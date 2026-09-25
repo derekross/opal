@@ -54,7 +54,7 @@ Opal holds your nsec, so it's built to be careful:
 ## Requirements
 
 - Omarchy (the Quattro shell with plugins) on Arch
-- Rust, to build the daemon: `sudo pacman -S --needed rustup && rustup default stable`
+- Optional: Rust, to build the daemon yourself (`sudo pacman -S --needed rustup && rustup default stable`). Without it, the installer downloads release binaries (x86_64 and aarch64).
 - A Secret Service provider: gnome-keyring (Omarchy's default)
 - Already on Omarchy: `systemd` (user services), `curl`, `jq`, `xdg-utils`
 - Optional: `khal` for the calendar status
@@ -79,10 +79,19 @@ git clone https://github.com/derekross/opal.git
 cd opal && ./dist/install.sh
 ```
 
-Either way, `install.sh` builds `opald` and `opal` into `~/.local/bin`,
+Either way, `install.sh` puts `opald` and `opal` in `~/.local/bin`,
 enables the `opal.service` systemd user service, registers the
 `nostrconnect://` link handler (asking first if another app has it), and puts
 the Opal gem in the bar. Click it to add a key or watch someone.
+
+**Binaries.** With Rust installed, `install.sh` builds from source. Without it,
+it downloads the release matching the plugin's version from
+[GitHub Releases](https://github.com/derekross/opal/releases). Each release is
+built by GitHub Actions from its tag. The installer checks the download against
+the release's `SHA256SUMS`, and against its build attestation too when the
+GitHub CLI is signed in. Choose explicitly with `install.sh --build` or
+`install.sh --prebuilt`. To check a download yourself:
+`gh attestation verify opal-v0.2.0-x86_64-linux.tar.gz --repo derekross/opal`.
 
 ## Update
 
@@ -139,6 +148,7 @@ crates/opald         the daemon: socket API, modules, locking, desktop popups
 crates/opal-cli      the `opal` command
 shell-plugin         Omarchy shell plugin (bar gem, panel, approval dialog)
 dist                 systemd unit, link handler, install script
+.github/workflows    release builds (tag vX.Y.Z → GitHub Release)
 docs/nip-scrobble.md draft NIP for kind 1073 scrobbles
 tests/interop        nostr-tools BunkerSigner against the signer
 ```
@@ -151,6 +161,10 @@ cargo test -p opal-core --test keyring -- --ignored    # real Secret Service
 (cd tests/interop && npm install && npm test)          # nostr-tools interop
 ./dist/dev-plugin.sh                                   # sync the shell plugin and reload it
 ```
+
+To release, bump the version in `manifest.json` and `Cargo.toml`, commit, then
+`git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow checks that all three
+match, runs the tests, and publishes the binaries.
 
 The plugin's service is `keepLoaded`, so changes to `OpalService.qml` need
 `omarchy-restart-shell`. For experiments, run a separate daemon that can't

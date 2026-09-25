@@ -1,13 +1,13 @@
 [package]
 name = "opal-signer"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
 futures = "0.3.34"
 hex = "0.4.3"
 nostr-sdk = "0.45"
-opal-core = { version = "0.1.0", path = "../opal-core" }
+opal-core = { path = "../opal-core" }
 rand = "0.10.3"
 rusqlite = "0.40.2"
 serde = { version = "1.0.229", features = ["derive"] }

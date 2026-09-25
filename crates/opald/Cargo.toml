@@ -1,6 +1,6 @@
 [package]
 name = "opald"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
@@ -10,10 +10,10 @@ clap = { version = "4.6.7", features = ["derive"] }
 futures = "0.3.34"
 nostr-connect = "0.45"
 nostr-sdk = "0.45"
-opal-core = { version = "0.1.0", path = "../opal-core" }
-opal-notify = { version = "0.1.0", path = "../opal-notify" }
-opal-signer = { version = "0.1.0", path = "../opal-signer" }
-opal-status = { version = "0.1.0", path = "../opal-status" }
+opal-core = { path = "../opal-core" }
+opal-notify = { path = "../opal-notify" }
+opal-signer = { path = "../opal-signer" }
+opal-status = { path = "../opal-status" }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 rustix = { version = "1.1.5", features = ["process"] }
 serde = { version = "1.0.229", features = ["derive"] }
