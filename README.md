@@ -51,24 +51,60 @@ Opal holds your nsec, so it's built to be careful:
 - **Untrusted text is only ever shown as plain text** in the panel and in popups; images are https-only.
 - **Hardened systemd unit**: no capabilities, seccomp filter, read-only home except Opal's own directories.
 
+## Requirements
+
+- Omarchy (the Quattro shell with plugins) on Arch
+- Rust, to build the daemon: `sudo pacman -S --needed rustup && rustup default stable`
+- A Secret Service provider: gnome-keyring (Omarchy's default)
+- Already on Omarchy: `systemd` (user services), `curl`, `jq`, `xdg-utils`
+- Optional: `khal` for the calendar status
+
 ## Install
 
-Opal is a daemon plus an Omarchy shell plugin. The simplest way gets both:
+Opal is a small daemon plus an Omarchy shell plugin. `omarchy plugin add`
+only copies plugin files (it never builds anything), so the daemon is
+installed with the included script.
+
+**With the Omarchy plugin command**
 
 ```sh
-sudo pacman -S --needed rustup && rustup default stable
+omarchy plugin add https://github.com/derekross/opal.git --enable
+~/.config/omarchy/plugins/derekross.opal/dist/install.sh
+```
+
+**Or from a clone**
+
+```sh
 git clone https://github.com/derekross/opal.git
 cd opal && ./dist/install.sh
 ```
 
-This builds `opald` and `opal`, installs them to `~/.local/bin`, enables the
-`opal.service` systemd user unit, registers the `nostrconnect://` link
-handler, and adds the Opal gem to the Omarchy bar. Click it to add a key or
-watch someone. Run it again after `git pull` to update.
+Either way, `install.sh` builds `opald` and `opal` into `~/.local/bin`,
+enables the `opal.service` systemd user service, registers the
+`nostrconnect://` link handler (asking first if another app has it), and puts
+the Opal gem in the bar. Click it to add a key or watch someone.
 
-If you installed the plugin with `omarchy plugin add
-https://github.com/derekross/opal.git`, finish by building the daemon from
-that checkout: `~/.config/omarchy/plugins/opal/dist/install.sh`.
+## Update
+
+```sh
+omarchy plugin update derekross.opal
+~/.config/omarchy/plugins/derekross.opal/dist/install.sh
+```
+
+(From a clone: `git pull && ./dist/install.sh`.) Updating keeps your keys and
+settings.
+
+## Remove
+
+```sh
+~/.config/omarchy/plugins/derekross.opal/dist/uninstall.sh      # or ./dist/uninstall.sh in a clone
+omarchy plugin remove derekross.opal                             # if added with omarchy plugin add
+```
+
+This stops and removes the service, binaries, link handler and plugin. Your
+keys stay in the keyring (encrypted) along with Opal's settings and history,
+so reinstalling picks up where you left off. To delete those too, export a
+backup of your keys first, then run `uninstall.sh --purge`.
 
 ## Use
 

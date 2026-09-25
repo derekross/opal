@@ -8,14 +8,13 @@ import qs.Ui
 // Bar icon + popup. One instance per monitor; all state lives in OpalService.
 Panel {
   id: root
-  moduleName: "opal"
   manageIpc: false
 
   // The service loads once for the whole shell; it may appear after us.
   property var svc: null
   function findService() {
     if (!svc && bar && bar.shell && typeof bar.shell.serviceFor === "function")
-      svc = bar.shell.serviceFor("opal")
+      svc = bar.shell.serviceFor(root.moduleName || "derekross.opal")
   }
   Component.onCompleted: findService()
   onBarChanged: findService()

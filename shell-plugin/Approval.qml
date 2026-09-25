@@ -18,7 +18,7 @@ Item {
 
   property bool opened: false
 
-  readonly property var svc: service || (shell && typeof shell.serviceFor === "function" ? shell.serviceFor("opal") : null)
+  readonly property var svc: service || (shell && typeof shell.serviceFor === "function" ? shell.serviceFor((manifest && manifest.id) || "derekross.opal") : null)
   readonly property color foreground: Color.popups.text
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color urgent: Color.urgent
@@ -49,7 +49,7 @@ Item {
   function close() { opened = false }
   function dismiss() {
     opened = false
-    if (shell && typeof shell.hide === "function") shell.hide((manifest && manifest.id) || "opal")
+    if (shell && typeof shell.hide === "function") shell.hide((manifest && manifest.id) || "derekross.opal")
   }
   function focusDefault() {
     if (mode === "unlock") passField.forceActiveFocus()

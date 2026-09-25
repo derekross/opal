@@ -12,7 +12,7 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property string pluginId: (manifest && manifest.id) || "opal"
+  readonly property string pluginId: (manifest && manifest.id) || "derekross.opal"
   readonly property string socketPath: Quickshell.env("XDG_RUNTIME_DIR") + "/opal.sock"
 
   // Our own record of the link: Socket.connected is also the *requested*
