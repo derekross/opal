@@ -82,6 +82,10 @@ else
   # Copied, not linked: the shell's file watcher doesn't follow symlinks.
   rm -rf "$PLUGIN_PATH.new"
   cp -r shell-plugin "$PLUGIN_PATH.new"
+  # The repo's single manifest points into shell-plugin/; here the files sit
+  # at the top of the plugin folder.
+  jq '.entryPoints |= with_entries(.value |= ltrimstr("shell-plugin/"))' manifest.json \
+    >"$PLUGIN_PATH.new/manifest.json"
   rm -rf "$PLUGIN_PATH"
   mv "$PLUGIN_PATH.new" "$PLUGIN_PATH"
 fi
