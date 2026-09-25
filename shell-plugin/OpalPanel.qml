@@ -60,7 +60,8 @@ Item {
     var t = []
     if (notificationsOn) t.push({ value: "notifications", label: svc.unread > 0 ? "Inbox " + svc.unread : "Inbox" })
     if (up && svc.statusOn) t.push({ value: "status", label: "Status" })
-    if (up && svc.hasAccounts && svc.signerOn) {
+    // Apps and Activity belong to your keys, not to a read-only profile.
+    if (up && svc.hasAccounts && svc.signerOn && !svc.readOnly) {
       t.push({ value: "apps", label: "Apps" })
       t.push({ value: "activity", label: "Activity" })
     }
