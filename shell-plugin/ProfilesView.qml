@@ -20,6 +20,8 @@ Column {
   spacing: Style.space(10)
 
   readonly property var accounts: svc ? svc.accounts : []
+  readonly property var watched: svc && svc.readOnly ? (svc.status.watched || {}) : null
+  property bool confirmUnwatch: false
 
   function add() {
     error = ""
@@ -39,6 +41,67 @@ Column {
       root.svc.message("Account added", false)
     })
   }
+
+  // Someone being watched (read-only).
+  PanelSectionHeader { visible: !!root.watched; text: "WATCHING"; foreground: root.dim }
+  CursorSurface {
+    width: root.width
+    visible: !!root.watched
+    foreground: root.foreground
+    implicitHeight: watchRow.implicitHeight + Style.spacing.xl
+    Row {
+      id: watchRow
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.leftMargin: Style.space(8)
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(10)
+      Avatar {
+        anchors.verticalCenter: parent.verticalCenter
+        size: Style.space(32)
+        picture: root.watched && root.watched.picture ? root.watched.picture : ""
+        foreground: root.foreground
+      }
+      Column {
+        width: parent.width - Style.space(42) - unwatchButton.width - Style.space(10)
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(1)
+        Text {
+          width: parent.width
+          elide: Text.ElideRight
+          color: root.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+          text: root.watched ? (root.watched.name || "Someone") + "  (read-only)" : ""
+        }
+        Text {
+          width: parent.width
+          elide: Text.ElideMiddle
+          color: root.dim
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          text: root.watched ? (root.watched.nip05 || U.shortKey(root.watched.npub)) : ""
+        }
+      }
+      Button {
+        id: unwatchButton
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.confirmUnwatch ? "Click again" : "Stop watching"
+        bordered: true
+        foreground: root.urgent
+        onClicked: {
+          if (!root.confirmUnwatch) { root.confirmUnwatch = true; return }
+          root.confirmUnwatch = false
+          root.svc.run("identity.unwatch", null, function() {
+            root.svc.refreshConfig()
+            root.svc.message("Stopped watching", false)
+          })
+        }
+      }
+    }
+  }
+  PanelSectionHeader { visible: !!root.watched && root.accounts.length > 0; text: "YOUR KEYS"; foreground: root.dim }
 
   Repeater {
     model: root.accounts
@@ -183,7 +246,7 @@ Column {
       id: pass
       width: parent.width
       password: true
-      placeholderText: "Your Opal passphrase"
+      placeholderText: root.accounts.length === 0 ? "Choose an Opal passphrase (8+ characters)" : "Your Opal passphrase"
       foreground: root.foreground
       onAccepted: root.add()
     }

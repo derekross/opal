@@ -407,6 +407,25 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             app.emit_state().await;
             Ok(json!({"pubkey": pk.to_hex(), "npub": pk.to_bech32()?}))
         }
+        "identity.unwatch" => {
+            // Stop watching someone (read-only mode) and forget them.
+            {
+                let mut cfg = app.config.write().await;
+                if cfg.identity.mode == opal_core::config::IdentityMode::ReadOnly {
+                    cfg.identity.mode = opal_core::config::IdentityMode::Local;
+                    // Without a key there's nothing left to show notifications for.
+                    if app.vault.accounts().await?.is_empty() {
+                        cfg.modules.notifications = false;
+                    }
+                }
+                cfg.identity.npub = None;
+                cfg.identity.nip05 = None;
+                cfg.save_to(&app.config_path)?;
+            }
+            crate::modules::reconcile(app).await;
+            app.emit_state().await;
+            Ok(json!({"ok": true}))
+        }
         "identity.local" => {
             {
                 let mut cfg = app.config.write().await;

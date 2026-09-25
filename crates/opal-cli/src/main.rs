@@ -91,6 +91,8 @@ enum Cmd {
     /// Watch someone's notifications without a key: an npub or a NIP-05
     /// address like derekross@grownostr.org.
     Watch { who: String },
+    /// Stop watching someone (read-only mode).
+    Unwatch,
     /// Set your NIP-38 status: `opal set-status "At the office" --for 4h`.
     SetStatus {
         text: String,
@@ -360,6 +362,10 @@ async fn run() -> Result<()> {
                     .unwrap_or_default(),
                 r["npub"].as_str().unwrap_or_default()
             );
+        }
+        Cmd::Unwatch => {
+            c.call("identity.unwatch", json!(null)).await?;
+            println!("Stopped watching.");
         }
         Cmd::SetStatus {
             text,

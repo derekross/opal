@@ -233,8 +233,8 @@ Column {
   Toggle {
     width: parent.width
     visible: root.hasKey
-    label: "Signer"
-    description: "NIP-46 remote signing for your apps"
+    label: "Log in to apps (signer)"
+    description: "Let Nostr apps use your key through bunker links (NIP-46). Off: no app can use it; statuses and DMs still work."
     checked: root.modules.signer !== false
     foreground: root.foreground
     onClicked: root.set({ modules: { signer: !checked } })
