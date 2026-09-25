@@ -76,8 +76,8 @@ Item {
     }
     var id = _nextId++
     if (done) _callbacks[id] = done
-    var sock = sockLoader.item
-    if (!sock) {
+    var sock = root.sock
+    if (!sock || !root.linked) {
       if (done) done("Opal isn't connected yet", null)
       return
     }
@@ -205,35 +205,33 @@ Item {
   }
 
   // Quickshell's Socket won't retry after a failed attempt, so each attempt
-  // gets a fresh Socket from this Loader.
-  Loader {
-    id: sockLoader
-    active: false
-    sourceComponent: Socket {
-      path: root.socketPath
-      Component.onCompleted: connected = true
-      parser: SplitParser {
-        onRead: function(line) {
-          var msg
-          try { msg = JSON.parse(line) } catch (e) { return }
-          root.handle(msg)
-        }
-      }
-      onConnectedChanged: {
-        root.linked = connected
-        if (connected) {
-          root.everConnected = true
-          root._callbacks = ({})
-          // The Loader hands out this Socket only after this handler returns.
-          Qt.callLater(function() {
-            root.call("subscribe", null, function(err, s) { if (!err) root.status = s || {} })
-            root.refreshAll()
-          })
-        } else {
-          root.status = ({})
-        }
-      }
-      onError: root.linked = false
+  // gets a fresh Socket. It's built from a string rather than a component in
+  // this file: when the plugin is updated the shell clears its component
+  // cache, but this service (keepLoaded) lives on and must still be able to
+  // make sockets.
+  property var sock: null
+  readonly property string sockQml: "import QtQuick; import Quickshell.Io; Socket {"
+    + " property var owner: null;"
+    + " parser: SplitParser { onRead: function(line) { if (owner) owner.onSocketLine(line) } }"
+    + " onConnectedChanged: if (owner) owner.onSocketConnected(connected);"
+    + " onError: if (owner) owner.onSocketConnected(false) }"
+
+  function onSocketLine(line) {
+    var msg
+    try { msg = JSON.parse(line) } catch (e) { return }
+    root.handle(msg)
+  }
+
+  function onSocketConnected(up) {
+    if (up === root.linked) return
+    root.linked = up
+    if (up) {
+      root.everConnected = true
+      root._callbacks = ({})
+      root.call("subscribe", null, function(err, s) { if (!err) root.status = s || {} })
+      root.refreshAll()
+    } else {
+      root.status = ({})
     }
   }
 
@@ -249,8 +247,20 @@ Item {
 
   function reconnectNow() {
     if (root.linked) return
-    sockLoader.active = false
-    sockLoader.active = true
+    if (root.sock) {
+      root.sock.owner = null
+      root.sock.destroy()
+      root.sock = null
+    }
+    try {
+      var s = Qt.createQmlObject(root.sockQml, root, "OpalSocket")
+      s.owner = root
+      s.path = root.socketPath
+      root.sock = s
+      s.connected = true
+    } catch (e) {
+      console.warn("opal: could not create a socket: " + e)
+    }
   }
 
   // Keep "last used" times and stats fresh while idle.
