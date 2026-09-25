@@ -53,16 +53,22 @@ Opal holds your nsec, so it's built to be careful:
 
 ## Install
 
+Opal is a daemon plus an Omarchy shell plugin. The simplest way gets both:
+
 ```sh
-./dist/install.sh
+sudo pacman -S --needed rustup && rustup default stable
+git clone https://github.com/derekross/opal.git
+cd opal && ./dist/install.sh
 ```
 
-Builds `opald` and `opal`, installs them to `~/.local/bin`, enables the
+This builds `opald` and `opal`, installs them to `~/.local/bin`, enables the
 `opal.service` systemd user unit, registers the `nostrconnect://` link
 handler, and adds the Opal gem to the Omarchy bar. Click it to add a key or
-watch someone.
+watch someone. Run it again after `git pull` to update.
 
-Requires Rust (`sudo pacman -S rustup && rustup default stable`).
+If you installed the plugin with `omarchy plugin add
+https://github.com/derekross/opal.git`, finish by building the daemon from
+that checkout: `~/.config/omarchy/plugins/opal/dist/install.sh`.
 
 ## Use
 

@@ -32,7 +32,10 @@ sed "s|@BINDIR@|$BINDIR|g" dist/opal-nostrconnect.desktop >"$APPDIR/opal-nostrco
 update-desktop-database "$APPDIR" 2>/dev/null || true
 xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect
 
-if [[ -d shell-plugin ]]; then
+if [[ "$PWD" == "$(realpath -m "$PLUGINDIR/opal")" ]]; then
+  # Installed with `omarchy plugin add`: this checkout *is* the plugin.
+  echo "Shell plugin already installed by 'omarchy plugin add'"
+elif [[ -d shell-plugin ]]; then
   echo "Installing the Omarchy shell plugin"
   mkdir -p "$PLUGINDIR"
   # Copied, not linked: the shell's file watcher doesn't follow symlinks and

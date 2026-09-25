@@ -13,9 +13,9 @@
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "service": "OpalService.qml",
-    "barWidget": "Widget.qml",
-    "overlay": "Approval.qml"
+    "service": "shell-plugin/OpalService.qml",
+    "barWidget": "shell-plugin/Widget.qml",
+    "overlay": "shell-plugin/Approval.qml"
   },
   "barWidget": {
     "displayName": "Opal",
