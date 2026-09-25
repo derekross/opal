@@ -35,23 +35,20 @@ Column {
     })
   }
 
-  PanelSectionHeader { text: "IDENTITY"; foreground: root.dim }
-  property string watchError: ""
-  property bool watchBusy: false
-  function watch(input) {
-    if (input.trim() === "") return
-    watchBusy = true
-    watchError = ""
-    svc.call("identity.watch", { input: input.trim() }, function(err) {
-      root.watchBusy = false
-      if (err) { root.watchError = err; return }
-      root.svc.refreshConfig()
-    })
+  Text {
+    width: parent.width
+    visible: root.watching
+    wrapMode: Text.Wrap
+    color: root.dim
+    font.family: Style.font.family
+    font.pixelSize: Style.font.caption
+    text: "You're watching someone (read-only). Manage it in Profiles."
   }
+  PanelSectionHeader { text: "SIGN WITH"; foreground: root.dim }
   // Signer settings only mean something with a key stored in Opal.
-  readonly property bool hasKey: !!root.svc && root.svc.hasAccounts
+  readonly property bool hasKey: !!root.svc && root.svc.hasAccounts === true
   // Settings that only concern answering apps over NIP-46.
-  readonly property bool signerOn: hasKey && root.svc.signerOn
+  readonly property bool signerOn: hasKey && root.svc.signerOn === true
   readonly property bool watching: !!root.cfg.identity && root.cfg.identity.mode === "read-only"
   readonly property bool external: !!root.cfg.identity && root.cfg.identity.mode === "external"
   property string idMode: watching ? "read-only" : external ? "external" : "local"
@@ -75,8 +72,7 @@ Column {
     width: parent.width
     options: [
       { value: "local", label: "My key", tooltip: "Use the account selected in Profiles" },
-      { value: "external", label: "External signer", tooltip: "Sign with a bunker such as Amber on your phone" },
-      { value: "read-only", label: "Watch someone", tooltip: "Notifications only, no key needed" }
+      { value: "external", label: "External signer", tooltip: "Sign with a bunker such as Amber on your phone" }
     ]
     value: root.idMode
     foreground: root.foreground
@@ -125,48 +121,6 @@ Column {
     font.pixelSize: Style.font.bodySmall
     text: root.bunkerError
   }
-  Text {
-    width: parent.width
-    visible: root.watching
-    elide: Text.ElideMiddle
-    color: root.dim
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
-    text: root.watching
-      ? "Watching " + (root.cfg.identity.nip05 || "") + (root.cfg.identity.nip05 ? " · " : "") + (root.cfg.identity.npub || "")
-      : ""
-  }
-  Row {
-    width: parent.width
-    visible: root.idMode === "read-only"
-    spacing: Style.space(8)
-    TextField {
-      id: watchField
-      width: parent.width - watchButton.width - parent.spacing
-      placeholderText: "npub or name@domain to watch"
-      foreground: root.foreground
-      onAccepted: root.watch(text)
-    }
-    Button {
-      id: watchButton
-      anchors.verticalCenter: watchField.verticalCenter
-      text: root.watchBusy ? "Looking up…" : "Watch"
-      iconSpinning: root.watchBusy
-      bordered: true
-      foreground: root.foreground
-      onClicked: root.watch(watchField.text)
-    }
-  }
-  Text {
-    width: parent.width
-    visible: root.watchError !== ""
-    wrapMode: Text.Wrap
-    color: root.urgent
-    font.family: Style.font.family
-    font.pixelSize: Style.font.bodySmall
-    text: root.watchError
-  }
-
   PanelSectionHeader { text: "LOCK AFTER"; foreground: root.dim; visible: root.hasKey }
   ButtonGroup {
     width: parent.width

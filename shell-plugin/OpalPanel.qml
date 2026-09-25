@@ -64,13 +64,15 @@ Item {
       t.push({ value: "apps", label: "Apps" })
       t.push({ value: "activity", label: "Activity" })
     }
-    t.push({ value: "profiles", label: "Profiles" })
-    t.push({ value: "settings", label: "Settings" })
     return t
   }
+  // Profiles and Settings live behind header buttons, not in the tab row.
+  readonly property var pages: ["profiles", "settings"]
+  function firstTab() { return tabs.length > 0 ? tabs[0].value : "profiles" }
   onTabsChanged: {
+    if (pages.indexOf(tab) !== -1) return
     for (var i = 0; i < tabs.length; i++) if (tabs[i].value === tab) return
-    tab = tabs.length > 0 ? tabs[0].value : "apps"
+    tab = firstTab()
   }
   onNotificationsOnChanged: if (notificationsOn && tab === "apps") tab = "notifications"
 
@@ -121,7 +123,7 @@ Item {
             id: headerText
             anchors.left: avatar.right
             anchors.leftMargin: Style.space(10)
-            anchors.right: lockButton.left
+            anchors.right: headerButtons.left
             anchors.rightMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
@@ -162,17 +164,37 @@ Item {
             }
           }
 
-          Button {
-            id: lockButton
+          Row {
+            id: headerButtons
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            visible: root.up && root.svc.hasAccounts
-            iconText: root.up && root.svc.locked ? "󰌾" : "󰿆"
-            tooltipText: root.up && root.svc.locked ? "Locked" : "Lock now"
-            foreground: root.foreground
-            onClicked: {
-              if (!root.svc.locked) root.svc.run("lock")
-              else unlockCard.focusField()
+            spacing: Style.space(2)
+
+            Button {
+              visible: root.up && root.svc.hasAccounts
+              iconText: root.up && root.svc.locked ? "󰌾" : "󰿆"
+              tooltipText: root.up && root.svc.locked ? "Locked" : "Lock now"
+              foreground: root.foreground
+              onClicked: {
+                if (!root.svc.locked) root.svc.run("lock")
+                else unlockCard.focusField()
+              }
+            }
+            Button {
+              visible: root.up && root.svc.configured
+              iconText: "󰀄"
+              tooltipText: "Profiles"
+              selected: root.tab === "profiles"
+              foreground: root.foreground
+              onClicked: root.tab = root.tab === "profiles" ? root.firstTab() : "profiles"
+            }
+            Button {
+              visible: root.up && root.svc.configured
+              iconText: "󰒓"
+              tooltipText: "Settings"
+              selected: root.tab === "settings"
+              foreground: root.foreground
+              onClicked: root.tab = root.tab === "settings" ? root.firstTab() : "settings"
             }
           }
         }
@@ -243,11 +265,20 @@ Item {
         // ── Tabs ──────────────────────────────────────────────────
         ButtonGroup {
           width: parent.width
-          visible: root.up && root.svc.configured
+          visible: root.up && root.svc.configured && (root.tabs.length > 1 || root.pages.indexOf(root.tab) !== -1)
           options: root.tabs
           value: root.tab
           foreground: root.foreground
           onChanged: function(v) { root.tab = v }
+        }
+
+        Text {
+          visible: root.up && root.svc.configured && root.pages.indexOf(root.tab) !== -1
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          font.bold: true
+          text: root.tab === "settings" ? "Settings" : "Profiles"
         }
 
         NotificationsView {

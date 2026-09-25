@@ -22,6 +22,24 @@ Column {
   readonly property var accounts: svc ? svc.accounts : []
   readonly property var watched: svc && svc.readOnly ? (svc.status.watched || {}) : null
   property bool confirmUnwatch: false
+  property bool addingWatch: false
+  property bool watchBusy: false
+  property string watchError: ""
+
+  function watch() {
+    var who = watchField.text.trim()
+    if (who === "") { watchError = "Enter an npub or a NIP-05 address."; return }
+    watchBusy = true
+    watchError = ""
+    svc.call("identity.watch", { input: who }, function(err) {
+      root.watchBusy = false
+      if (err) { root.watchError = err; return }
+      watchField.text = ""
+      root.addingWatch = false
+      root.svc.refreshConfig()
+      root.svc.message("Watching " + who, false)
+    })
+  }
 
   function add() {
     error = ""
@@ -196,13 +214,72 @@ Column {
     text: "Deleting removes the key from this computer and disconnects its apps. Make sure you have a backup."
   }
 
-  Button {
-    visible: !root.adding
-    text: "Add account"
-    iconText: "󰐕"
-    bordered: true
-    foreground: root.foreground
-    onClicked: root.adding = true
+  Row {
+    spacing: Style.space(8)
+    visible: !root.adding && !root.addingWatch
+    Button {
+      text: "Add account"
+      iconText: "󰐕"
+      bordered: true
+      foreground: root.foreground
+      onClicked: root.adding = true
+    }
+    Button {
+      text: root.watched ? "Watch someone else" : "Watch someone"
+      iconText: "󰈈"
+      bordered: true
+      foreground: root.foreground
+      tooltipText: "Read-only: see anyone's notifications without their key"
+      onClicked: { root.addingWatch = true; Qt.callLater(function() { watchField.forceActiveFocus() }) }
+    }
+  }
+
+  // Watch someone (read-only profile).
+  Column {
+    width: parent.width
+    visible: root.addingWatch
+    spacing: Style.space(8)
+    Text {
+      width: parent.width
+      wrapMode: Text.Wrap
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: "Read-only: see notifications for anyone, no key needed. Enter an npub or a NIP-05 address like you@example.com."
+    }
+    TextField {
+      id: watchField
+      width: parent.width
+      placeholderText: "npub1… or name@domain"
+      foreground: root.foreground
+      onAccepted: root.watch()
+      Keys.onEscapePressed: root.addingWatch = false
+    }
+    Text {
+      width: parent.width
+      visible: root.watchError !== ""
+      wrapMode: Text.Wrap
+      color: root.urgent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: root.watchError
+    }
+    Row {
+      spacing: Style.space(8)
+      Button {
+        text: root.watchBusy ? "Looking up…" : "Watch"
+        iconSpinning: root.watchBusy
+        iconText: "󰈈"
+        bordered: true
+        foreground: root.foreground
+        onClicked: if (!root.watchBusy) root.watch()
+      }
+      Button {
+        text: "Cancel"
+        foreground: root.foreground
+        onClicked: { root.addingWatch = false; root.watchError = "" }
+      }
+    }
   }
 
   Column {
