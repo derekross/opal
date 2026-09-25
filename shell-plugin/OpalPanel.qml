@@ -206,7 +206,7 @@ Item {
             iconText: "󰐊"
             bordered: true
             foreground: root.foreground
-            onClicked: Quickshell.execDetached(["systemctl", "--user", "start", "opal.service"])
+            onClicked: root.svc ? root.svc.startDaemon() : Quickshell.execDetached(["systemctl", "--user", "start", "opal.service"])
           }
         }
 

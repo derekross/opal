@@ -15,7 +15,10 @@ Item {
   readonly property string pluginId: (manifest && manifest.id) || "opal"
   readonly property string socketPath: Quickshell.env("XDG_RUNTIME_DIR") + "/opal.sock"
 
-  readonly property bool connected: sock.connected
+  // Our own record of the link: Socket.connected is also the *requested*
+  // state, so it can read true after a failed attempt.
+  property bool linked: false
+  readonly property bool connected: linked
   property bool everConnected: false
 
   // Daemon state (see opald `status`).
@@ -62,12 +65,17 @@ Item {
   property var _callbacks: ({})
 
   function call(method, params, done) {
-    if (!sock.connected) {
+    if (!root.linked) {
       if (done) done("Opal isn't running", null)
       return
     }
     var id = _nextId++
     if (done) _callbacks[id] = done
+    var sock = sockLoader.item
+    if (!sock) {
+      if (done) done("Opal isn't connected yet", null)
+      return
+    }
     sock.write(JSON.stringify({ id: id, method: method, params: params === undefined ? null : params }) + "\n")
     sock.flush()
   }
@@ -78,6 +86,12 @@ Item {
       if (err) root.message(err, true)
       else if (onOk) onOk(result)
     })
+  }
+
+  // "Start Opal": start the service and connect as soon as it listens.
+  function startDaemon() {
+    Quickshell.execDetached(["systemctl", "--user", "start", "opal.service"])
+    reconnectNow()
   }
 
   function refreshApps() { call("apps.list", null, function(e, r) { if (!e) root.apps = r || [] }) }
@@ -185,47 +199,59 @@ Item {
     onTriggered: { root.refreshActivity(); root.refreshApps() }
   }
 
-  Socket {
-    id: sock
-    path: root.socketPath
-    parser: SplitParser {
-      onRead: function(line) {
-        var msg
-        try { msg = JSON.parse(line) } catch (e) { return }
-        root.handle(msg)
+  // Quickshell's Socket won't retry after a failed attempt, so each attempt
+  // gets a fresh Socket from this Loader.
+  Loader {
+    id: sockLoader
+    active: false
+    sourceComponent: Socket {
+      path: root.socketPath
+      Component.onCompleted: connected = true
+      parser: SplitParser {
+        onRead: function(line) {
+          var msg
+          try { msg = JSON.parse(line) } catch (e) { return }
+          root.handle(msg)
+        }
       }
-    }
-    onConnectedChanged: {
-      if (connected) {
-        root.everConnected = true
-        root._callbacks = ({})
-        root.call("subscribe", null, function(err, s) { if (!err) root.status = s || {} })
-        root.refreshAll()
-      } else {
-        root.status = ({})
-        reconnect.restart()
+      onConnectedChanged: {
+        root.linked = connected
+        if (connected) {
+          root.everConnected = true
+          root._callbacks = ({})
+          // The Loader hands out this Socket only after this handler returns.
+          Qt.callLater(function() {
+            root.call("subscribe", null, function(err, s) { if (!err) root.status = s || {} })
+            root.refreshAll()
+          })
+        } else {
+          root.status = ({})
+        }
       }
+      onError: root.linked = false
     }
-    onError: reconnect.restart()
   }
 
   // The daemon may start after the shell, or restart; keep trying.
   Timer {
     id: reconnect
     interval: 2000
-    running: true
-    onTriggered: {
-      if (sock.connected) return
-      sock.connected = false
-      sock.connected = true
-      if (!sock.connected) restart()
-    }
+    running: !root.linked
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.reconnectNow()
+  }
+
+  function reconnectNow() {
+    if (root.linked) return
+    sockLoader.active = false
+    sockLoader.active = true
   }
 
   // Keep "last used" times and stats fresh while idle.
   Timer {
     interval: 60000
-    running: sock.connected
+    running: root.linked
     repeat: true
     onTriggered: root.refreshActivity()
   }

@@ -13,6 +13,7 @@ Column {
   readonly property color dim: Qt.darker(foreground, 1.55)
 
   readonly property var info: svc ? svc.statusInfo : ({})
+  readonly property bool running: info.running === true
   readonly property var snap: info.snapshot || ({})
   readonly property var np: snap.now_playing || null
   readonly property var general: snap.general || null
@@ -52,7 +53,7 @@ Column {
   // ── Not running ────────────────────────────────────────────────
   Text {
     width: parent.width
-    visible: !root.info.running
+    visible: !root.running
     wrapMode: Text.Wrap
     color: root.info.blocked ? root.urgent : root.dim
     font.family: Style.font.family
@@ -61,10 +62,10 @@ Column {
   }
 
   // ── Now playing ────────────────────────────────────────────────
-  PanelSectionHeader { text: "NOW PLAYING"; foreground: root.dim; visible: root.info.running }
+  PanelSectionHeader { text: "NOW PLAYING"; foreground: root.dim; visible: root.running }
   Row {
     width: parent.width
-    visible: root.info.running
+    visible: root.running
     spacing: Style.space(10)
     Rectangle {
       width: Style.space(40)
@@ -116,10 +117,10 @@ Column {
   }
 
   // ── Your status ────────────────────────────────────────────────
-  PanelSectionHeader { text: "YOUR STATUS"; foreground: root.dim; visible: root.info.running }
+  PanelSectionHeader { text: "YOUR STATUS"; foreground: root.dim; visible: root.running }
   Row {
     width: parent.width
-    visible: root.info.running && !!root.general
+    visible: root.running && !!root.general
     spacing: Style.space(8)
     Text {
       width: parent.width - clearButton.width - parent.spacing
@@ -144,7 +145,7 @@ Column {
   TextField {
     id: statusField
     width: parent.width
-    visible: root.info.running
+    visible: root.running
     placeholderText: "What are you up to?"
     foreground: root.foreground
     onAccepted: root.setStatus()
@@ -153,14 +154,14 @@ Column {
   TextField {
     id: linkField
     width: parent.width
-    visible: root.info.running && statusField.text !== ""
+    visible: root.running && statusField.text !== ""
     placeholderText: "Link (optional, https://…)"
     foreground: root.foreground
     onAccepted: root.setStatus()
   }
   Row {
     width: parent.width
-    visible: root.info.running
+    visible: root.running
     spacing: Style.space(8)
     ButtonGroup {
       width: parent.width - setButton.width - parent.spacing
