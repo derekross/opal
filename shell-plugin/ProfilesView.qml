@@ -17,6 +17,10 @@ Column {
   property bool busy: false
   property string error: ""
   property string confirmRemove: ""
+  // A key being deleted: asks for the passphrase right here.
+  property var deleting: null
+  property string deleteError: ""
+  property bool deleteBusy: false
 
   spacing: Style.space(10)
 
@@ -27,7 +31,23 @@ Column {
     secret.text = ""; ncPass.text = ""; pass.text = ""; nick.text = ""; error = ""
   }
   onAddModeChanged: clearFields()
-  onVisibleChanged: if (!visible) { clearFields(); adding = false; confirmRemove = "" }
+  onVisibleChanged: if (!visible) { clearFields(); adding = false; confirmRemove = ""; cancelDelete() }
+
+  function cancelDelete() { deleting = null; deleteError = ""; deletePass.text = "" }
+
+  function confirmDelete() {
+    if (!deleting || deleteBusy) return
+    if (deletePass.text === "") { deleteError = "Enter your Opal passphrase."; return }
+    deleteBusy = true
+    var label = deleting.label
+    svc.call("accounts.remove", { pubkey: deleting.pubkey, passphrase: deletePass.text }, function(err) {
+      root.deleteBusy = false
+      deletePass.text = ""
+      if (err) { root.deleteError = err; return }
+      root.cancelDelete()
+      root.svc.message("Deleted " + label, false)
+    })
+  }
 
   readonly property var accounts: svc ? svc.accounts : []
   readonly property bool readOnlyActive: !!svc && svc.readOnly
@@ -74,8 +94,11 @@ Column {
     if (confirmRemove !== p.id) { confirmRemove = p.id; return }
     confirmRemove = ""
     if (p.readOnly) svc.run("identity.unwatch", null, function() { root.svc.refreshConfig() })
-    else svc.runGuarded("accounts.remove", { pubkey: p.pubkey }, null,
-      "Deleting removes this key from the computer. Confirm with your Opal passphrase.")
+    else {
+      deleting = p
+      deleteError = ""
+      Qt.callLater(function() { deletePass.forceActiveFocus() })
+    }
   }
 
   function add() {
@@ -195,10 +218,68 @@ Column {
     }
   }
 
+  // Deleting a key: confirm with the passphrase, right here.
+  Column {
+    width: parent.width
+    visible: !!root.deleting
+    spacing: Style.space(6)
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      wrapMode: Text.Wrap
+      color: root.urgent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: root.deleting
+        ? "Delete " + root.deleting.label + "? This removes the key from this computer and disconnects its apps. Make sure you have a backup. Enter your Opal passphrase to confirm (Opal doesn't need to be unlocked)."
+        : ""
+    }
+    Row {
+      width: parent.width
+      spacing: Style.space(8)
+      TextField {
+        id: deletePass
+        width: parent.width - deleteButton.width - deleteCancel.width - 2 * parent.spacing
+        password: true
+        placeholderText: "Opal passphrase"
+        foreground: root.foreground
+        onAccepted: root.confirmDelete()
+        Keys.onEscapePressed: root.cancelDelete()
+      }
+      Button {
+        id: deleteButton
+        anchors.verticalCenter: deletePass.verticalCenter
+        text: root.deleteBusy ? "Deleting…" : "Delete"
+        iconText: "󰆴"
+        iconSpinning: root.deleteBusy
+        bordered: true
+        foreground: root.urgent
+        onClicked: root.confirmDelete()
+      }
+      Button {
+        id: deleteCancel
+        anchors.verticalCenter: deletePass.verticalCenter
+        text: "Cancel"
+        foreground: root.foreground
+        onClicked: root.cancelDelete()
+      }
+    }
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      visible: root.deleteError !== ""
+      wrapMode: Text.Wrap
+      color: root.urgent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: root.deleteError
+    }
+  }
+
   Text {
     textFormat: Text.PlainText
     width: parent.width
-    visible: root.confirmRemove !== ""
+    visible: root.confirmRemove !== "" && !root.deleting
     wrapMode: Text.Wrap
     color: root.urgent
     font.family: Style.font.family
