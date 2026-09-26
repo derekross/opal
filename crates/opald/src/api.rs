@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use nostr_sdk::prelude::nip49::KeySecurity;
-use nostr_sdk::prelude::{Keys, PublicKey, Timestamp, ToBech32};
+use nostr_sdk::prelude::{Keys, PublicKey, SignEvent, Timestamp, ToBech32, UnsignedEvent, nip44};
 use opal_core::config::{Config, Policy};
 use opal_core::import::{ImportOptions, parse_secret};
 use opal_signer::kinds;
-use opal_signer::permissions::{Remember, Rule, expand_perms};
+use opal_signer::permissions::{Remember, Rule, Source, expand_perms};
 use opal_signer::protocol::Method;
-use opal_signer::store::ActivityQuery;
+use opal_signer::store::{ActivityEntry, ActivityQuery};
 use opal_signer::{NostrConnectUri, PromptAnswer};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -463,6 +463,67 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({"online": p.online}))
         }
 
+        // ── Other apps on this computer (Peridot) ──────────────────────
+        // A local app may sign a few of its own kinds and encrypt to the
+        // user's own key, with no prompt: it runs as the same user and is
+        // limited to what it declares. Every use is in the activity log.
+        "app.sign" => {
+            #[derive(Deserialize)]
+            struct P {
+                app: String,
+                pubkey: Option<String>,
+                event: UnsignedEvent,
+            }
+            let p: P = parse(params)?;
+            let allowed = app_kinds(&p.app)?;
+            let kind = p.event.kind.as_u16();
+            if !allowed.contains(&kind) {
+                bail!("{} may not sign kind {kind} events", app_name(&p.app));
+            }
+            let pk = account_or_current(app, p.pubkey.as_deref())?;
+            if p.event.pubkey != pk {
+                bail!("the event isn't for that account");
+            }
+            let keys = app.vault.keys(&pk).await.map_err(|e| match e {
+                opal_core::Error::Locked => anyhow!("Opal is locked"),
+                e => anyhow!(e),
+            })?;
+            let ev = keys.sign_event(p.event)?;
+            // Not "activity": apps can't keep Opal unlocked, only you can.
+            log_app_use(app, &p.app, &pk, Method::SignEvent, Some(kind));
+            Ok(json!(ev))
+        }
+        "app.nip44" => {
+            #[derive(Deserialize)]
+            struct P {
+                app: String,
+                pubkey: Option<String>,
+                op: String,
+                content: String,
+            }
+            let p: P = parse(params)?;
+            app_kinds(&p.app)?;
+            let pk = account_or_current(app, p.pubkey.as_deref())?;
+            let keys = app.vault.keys(&pk).await.map_err(|e| match e {
+                opal_core::Error::Locked => anyhow!("Opal is locked"),
+                e => anyhow!(e),
+            })?;
+            // Only to the user's own key: enough for an app's private data.
+            let (out, method) = match p.op.as_str() {
+                "encrypt" => (
+                    nip44::encrypt(keys.secret_key(), &pk, &p.content, nip44::Version::V2)?,
+                    Method::Nip44Encrypt,
+                ),
+                "decrypt" => (
+                    nip44::decrypt(keys.secret_key(), &pk, &p.content)?,
+                    Method::Nip44Decrypt,
+                ),
+                _ => bail!("op must be encrypt or decrypt"),
+            };
+            log_app_use(app, &p.app, &pk, method, None);
+            Ok(json!({"content": out}))
+        }
+
         "qr.svg" => {
             // Render a QR code (e.g. a bunker URI) for the panel.
             #[derive(Deserialize)]
@@ -881,6 +942,41 @@ fn check_passphrase_strength(p: &str) -> Result<()> {
 
 /// Actions that weaken protection need the Opal passphrase, so another
 /// program running as you can't quietly do them through the socket.
+/// Event kinds a local app may sign, by app id.
+fn app_kinds(app: &str) -> Result<&'static [u16]> {
+    match app {
+        // Encrypted app data, deletions, its ephemeral pairing messages,
+        // and relay authentication (NIP-42).
+        "peridot" => Ok(&[30078, 5, 21078, 22242]),
+        _ => bail!("unknown app: {app}"),
+    }
+}
+
+fn app_name(app: &str) -> &'static str {
+    match app {
+        "peridot" => "Peridot",
+        _ => "an app",
+    }
+}
+
+fn log_app_use(app: &App, app_id: &str, account: &PublicKey, method: Method, kind: Option<u16>) {
+    if let Some(store) = app.signer.store() {
+        let _ = store.log_activity(&ActivityEntry {
+            id: 0,
+            at: Timestamp::now().as_secs(),
+            app_id: app_id.into(),
+            app_name: app_name(app_id).into(),
+            account: account.to_hex(),
+            method,
+            kind,
+            kind_label: None,
+            allowed: true,
+            source: Source::Automatic,
+            reason: None,
+        });
+    }
+}
+
 async fn require_passphrase(app: &App, given: Option<&Zeroizing<String>>) -> Result<()> {
     match given {
         Some(p) if !p.is_empty() => {
