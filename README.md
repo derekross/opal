@@ -92,7 +92,7 @@ built by GitHub Actions from its tag. The installer checks the download against
 the release's `SHA256SUMS`, and against its build attestation too when the
 GitHub CLI is signed in. Choose explicitly with `install.sh --build` or
 `install.sh --prebuilt`. To check a download yourself:
-`gh attestation verify opal-v0.3.0-x86_64-linux.tar.gz --repo derekross/opal`.
+`gh attestation verify opal-v0.3.1-x86_64-linux.tar.gz --repo derekross/opal`.
 
 ## Update
 
@@ -148,20 +148,29 @@ answers and prompts as a NIP-46 app.
 
 **Pairing.** The program calls `app.connect` with its id, a display name,
 the event kinds it will ask for and whether it needs NIP-44 encryption of
-its own data. The approval dialog shows all of that plus the program's
-executable path (from `/proc`) and the account it would sign as. You pick a
+its own data. The approval dialog shows all of that plus where the program
+runs (its systemd unit, e.g. `peridot.service`, and its executable path when
+that can be read) and the account it would sign as. You pick a
 policy and tick what it may always do; sensitive kinds (Blossom and HTTP
 auth, relay logins, deletions…) and decryption can't be pre-allowed, so they
 ask each time, remembered for an hour at most, unless you give the app full
 trust (which needs your passphrase). Pairing again replaces the earlier
 pairing: new token, fresh rules.
 
-**Afterwards.** The app is listed under Apps with the path it paired from;
+**Afterwards.** The app is listed under Apps with where it paired from;
 change its policy, delete saved answers or revoke it there. Revoking stops
-its token at once. The token only works from the program that paired: if the
-executable path changes (a rebuilt development binary, say) the app is told
-to pair again, and you get a prompt. While Opal is locked, local apps are
-refused straight away rather than kept waiting, and nothing is logged.
+its token at once. The token only works from where the pairing was made:
+the same systemd unit, and the same executable where Opal could read it. A
+daemon running from a different unit (or a development build run from a
+terminal) is told to pair again, and you get a prompt. While Opal is locked,
+local apps are refused straight away rather than kept waiting, and nothing
+is logged.
+
+Why the unit and not just the path: the daemon runs in a hardened user
+service, and from inside one Linux won't let it read `/proc/<pid>/exe` of
+another sandboxed, non-dumpable service (that needs ptrace rights over the
+peer). The cgroup, and so the unit name, is set by systemd and readable by
+anyone.
 
 **What it can't do.** Any program running as your user can open the socket,
 so the socket itself grants nothing: it takes a pairing you clicked through,

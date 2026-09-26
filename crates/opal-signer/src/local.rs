@@ -5,9 +5,10 @@
 //! link, and from then on send a pairing token with every request. The
 //! token only says *which* paired app is asking; what it may do is decided
 //! by the app's policy, its saved rules and prompts, exactly like a remote
-//! app. The daemon also remembers which executable paired and refuses other
+//! app. The daemon also remembers where the pairing came from (the systemd
+//! unit, and the executable when that's readable) and refuses other
 //! programs that show up with the token. Any process running as the user
-//! could still exec the real program, so the real protections are the
+//! could still start the real program, so the real protections are the
 //! pairing prompt, the rules, and the activity log.
 
 use std::path::{Path, PathBuf};
@@ -35,6 +36,7 @@ pub struct LocalPairing {
     pub kinds: Vec<u16>,
     pub nip44: bool,
     pub exe: Option<PathBuf>,
+    pub unit: Option<String>,
     /// `(method, kind)` pairs to allow from now on; filtered to
     /// [`grantable`], so nothing sensitive slips in.
     pub grant: Vec<(Method, Option<u16>)>,
@@ -80,6 +82,7 @@ pub fn local_info(a: &LocalAppRecord) -> ConnectionInfo {
         last_used: a.last_used.map(|t| t.as_secs()),
         expires_unused_at: None,
         exe: a.exe.clone(),
+        unit: a.unit.clone(),
         kinds: a.kinds.clone(),
         nip44: a.nip44,
     }
@@ -124,6 +127,7 @@ impl Signer {
             kinds: p.kinds,
             nip44: p.nip44,
             exe: p.exe.map(|e| e.to_string_lossy().into_owned()),
+            unit: p.unit,
             token_hash: hash_secret(&token),
             created_at: existing.as_ref().map_or(now, |e| e.created_at),
             last_used: None,
@@ -169,15 +173,20 @@ impl Signer {
             .flatten()
     }
 
-    /// The token is only good from the program that paired.
-    pub fn check_local_peer(a: &LocalAppRecord, peer_exe: Option<&Path>) -> Result<(), String> {
-        let peer = peer_exe.map(|p| p.to_string_lossy().into_owned());
-        if peer == a.exe {
+    /// The token is only good from where the pairing was made: the same
+    /// systemd unit, and the same executable where that could be read.
+    pub fn check_local_peer(
+        a: &LocalAppRecord,
+        peer_exe: Option<&Path>,
+        peer_unit: Option<&str>,
+    ) -> Result<(), String> {
+        let exe = peer_exe.map(|p| p.to_string_lossy().into_owned());
+        if exe == a.exe && peer_unit == a.unit.as_deref() {
             Ok(())
         } else {
             Err(format!(
                 "paired with a different program ({}); pair again",
-                a.exe.as_deref().unwrap_or("unknown")
+                a.exe.as_deref().or(a.unit.as_deref()).unwrap_or("unknown")
             ))
         }
     }
@@ -327,16 +336,25 @@ mod tests {
             kinds: vec![],
             nip44: false,
             exe: Some("/usr/bin/peridotd".into()),
+            unit: Some("peridot.service".into()),
             token_hash: String::new(),
             created_at: Timestamp::from(1),
             last_used: None,
         };
-        assert!(Signer::check_local_peer(&a, Some(Path::new("/usr/bin/peridotd"))).is_ok());
-        let err = Signer::check_local_peer(&a, Some(Path::new("/tmp/evil"))).unwrap_err();
+        let exe = Some(Path::new("/usr/bin/peridotd"));
+        assert!(Signer::check_local_peer(&a, exe, Some("peridot.service")).is_ok());
+        let err =
+            Signer::check_local_peer(&a, Some(Path::new("/tmp/evil")), Some("peridot.service"))
+                .unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
-        assert!(Signer::check_local_peer(&a, None).is_err());
+        assert!(Signer::check_local_peer(&a, exe, Some("evil.service")).is_err());
+        assert!(Signer::check_local_peer(&a, exe, None).is_err());
+        assert!(Signer::check_local_peer(&a, None, Some("peridot.service")).is_err());
+        // The usual case under systemd: no executable, only the unit.
         a.exe = None;
-        assert!(Signer::check_local_peer(&a, None).is_ok());
-        assert!(Signer::check_local_peer(&a, Some(Path::new("/usr/bin/peridotd"))).is_err());
+        assert!(Signer::check_local_peer(&a, None, Some("peridot.service")).is_ok());
+        assert!(Signer::check_local_peer(&a, exe, Some("peridot.service")).is_err());
+        let err = Signer::check_local_peer(&a, None, Some("other.service")).unwrap_err();
+        assert!(err.contains("peridot.service"), "{err}");
     }
 }

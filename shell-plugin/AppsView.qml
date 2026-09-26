@@ -293,7 +293,7 @@ Column {
         var parts = []
         if (a.kind === "local") {
           parts.push("A program on this computer")
-          parts.push("program: " + (a.exe || "unknown"))
+          parts.push("program: " + (a.exe || a.unit || "unknown"))
           parts.push("may ask for kinds " + (a.kinds || []).join(", ") + (a.nip44 ? " and its own encryption" : ""))
           return parts.join(" · ")
         }

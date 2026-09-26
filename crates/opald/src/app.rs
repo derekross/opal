@@ -73,6 +73,7 @@ impl LocalOffer {
             "app": self.app_key,
             "name": self.name,
             "exe": self.peer.exe.as_ref().map(|p| p.to_string_lossy()),
+            "unit": self.peer.unit,
             "pid": self.peer.pid,
             "account": self.account.to_hex(),
             "account_label": account_label,

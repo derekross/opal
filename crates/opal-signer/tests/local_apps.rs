@@ -19,6 +19,7 @@ use opal_signer::{
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const EXE: &str = "/home/me/.local/bin/peridotd";
+const UNIT: &str = "peridot.service";
 
 struct Env {
     vault: Arc<Vault>,
@@ -81,6 +82,7 @@ fn pairing(e: &Env, policy: Policy, grant: &[(Method, Option<u16>)]) -> LocalPai
         kinds: vec![30078, 22242, 24242],
         nip44: true,
         exe: Some(EXE.into()),
+        unit: Some(UNIT.into()),
         grant: grant.to_vec(),
     }
 }
@@ -125,6 +127,7 @@ async fn pairing_creates_row_rules_and_token() {
     assert_eq!(info.kind, AppKind::Local);
     assert_eq!(info.display_name, "Peridot");
     assert_eq!(info.exe.as_deref(), Some(EXE));
+    assert_eq!(info.unit.as_deref(), Some(UNIT));
     assert_eq!(info.kinds, vec![30078, 22242, 24242]);
     assert!(info.nip44);
     assert_eq!(token.len(), 64);

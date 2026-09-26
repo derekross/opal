@@ -254,7 +254,7 @@ Item {
                     return root.svc.unlockRequest ? root.svc.unlockRequest.app_name + " is waiting for your signature" : "Requests are waiting"
                   case "offer":
                     if (root.localOffer)
-                      return "A program on this computer · " + (root.offer.exe || ("unknown program (pid " + root.offer.pid + ")"))
+                      return "A program on this computer · " + (root.offer.exe || root.offer.unit || ("unknown program (pid " + root.offer.pid + ")"))
                     return (root.offer.url ? root.offer.url + " (as the app claims) · " : "Unverified app · ")
                       + root.offer.relays.join(", ")
                   case "prompt":
@@ -335,15 +335,26 @@ Item {
               color: root.dim
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
-              text: "Only this program, from this path, can use the pairing. You can change or revoke it under Apps."
+              text: "Only this program, started the same way, can use the pairing. You can change or revoke it under Apps."
             }
             PanelSectionHeader { text: "WHEN IT ASKS"; foreground: root.dim }
+            // Full trust needs the passphrase, which this dialog doesn't
+            // take; it can be given later under Apps.
             ButtonGroup {
               width: parent.width
-              options: U.policyOptions
+              options: U.policyOptions.filter(function(o) { return o.value !== "full-trust" })
               value: root.policy
               foreground: root.foreground
               onChanged: function(v) { root.policy = v }
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.Wrap
+              color: root.dim
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              text: "Full trust can be given later under Apps, with your passphrase."
             }
             PanelSectionHeader {
               visible: root.offer && root.offer.perms.length > 0

@@ -70,6 +70,7 @@ pub struct ConnectionInfo {
     /// Local apps: the program it was paired from, the kinds it declared,
     /// and whether it may encrypt to the user's own key.
     pub exe: Option<String>,
+    pub unit: Option<String>,
     pub kinds: Vec<u16>,
     pub nip44: bool,
 }
@@ -105,6 +106,7 @@ impl Connection {
             last_used: self.last_used.map(|t| t.as_secs()),
             expires_unused_at: self.expires_unused_at.map(|t| t.as_secs()),
             exe: None,
+            unit: None,
             kinds: Vec::new(),
             nip44: false,
         }

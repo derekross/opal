@@ -596,6 +596,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 kinds: offer.kinds,
                 nip44: offer.nip44,
                 exe: offer.peer.exe,
+                unit: offer.peer.unit,
                 grant,
             };
             let result = app.signer.pair_local_app(pairing).await;
@@ -1107,7 +1108,8 @@ fn local_app(app: &App, peer: &Peer, token: &str) -> Result<opal_signer::LocalAp
         .signer
         .local_app_by_token(token)
         .ok_or(anyhow!("not paired"))?;
-    opal_signer::Signer::check_local_peer(&paired, peer.exe.as_deref()).map_err(|e| anyhow!(e))?;
+    opal_signer::Signer::check_local_peer(&paired, peer.exe.as_deref(), peer.unit.as_deref())
+        .map_err(|e| anyhow!(e))?;
     Ok(paired)
 }
 
@@ -1272,6 +1274,17 @@ mod tests {
             uid: 1000,
             pid: Some(4242),
             exe: Some(PathBuf::from(exe)),
+            unit: Some("peridot.service".into()),
+        }
+    }
+
+    /// The usual case: a service whose executable the sandbox can't read.
+    fn unit_peer(unit: &str) -> Peer {
+        Peer {
+            uid: 1000,
+            pid: Some(4242),
+            exe: None,
+            unit: Some(unit.into()),
         }
     }
 
@@ -1411,8 +1424,59 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
-        let err = sign(Peer::default(), token, 30078).await.unwrap_err();
+        let err = sign(Peer::default(), token.clone(), 30078)
+            .await
+            .unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
+        let err = sign(unit_peer("peridot.service"), token, 30078)
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("paired with a different program"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_service_pairs_by_its_unit_when_its_exe_is_unreadable() {
+        let (app, pk) = test_app().await;
+        let connect = {
+            let (app, peer) = (app.clone(), unit_peer("peridot.service"));
+            tokio::spawn(async move { call(&app, &peer, "app.connect", connect_params()).await })
+        };
+        let offer = wait_for_offer(&app).await;
+        assert!(offer["exe"].is_null());
+        assert_eq!(offer["unit"], json!("peridot.service"));
+        call(
+            &app,
+            &Peer::default(),
+            "app.accept",
+            json!({"offer_id": offer["id"], "policy": "basic", "grant": ["sign_event:30078"]}),
+        )
+        .await
+        .unwrap();
+        let token = connect.await.unwrap().unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let ok = call(
+            &app,
+            &unit_peer("peridot.service"),
+            "app.sign",
+            json!({"token": token, "event": unsigned(pk, 30078)}),
+        )
+        .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        let err = call(
+            &app,
+            &unit_peer("evil.service"),
+            "app.sign",
+            json!({"token": token, "event": unsigned(pk, 30078)}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("peridot.service"), "{err}");
+        let apps = call(&app, &Peer::default(), "apps.list", json!(null))
+            .await
+            .unwrap();
+        assert_eq!(apps[0]["unit"], json!("peridot.service"));
     }
 
     #[tokio::test]

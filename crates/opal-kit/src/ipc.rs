@@ -18,18 +18,25 @@ use zeroize::Zeroize;
 const MAX_LINE: usize = 64 * 1024;
 
 /// Who is on the other end of a connection: the socket's peer credentials
-/// plus what `/proc` says that process is running.
+/// plus what `/proc` says about that process.
 ///
 /// The uid is checked before any request is read; the rest is for daemons
 /// that want to know *which* of the user's programs is asking (Opal binds
-/// paired local apps to their executable). Any process of the same user can
-/// exec the real program, so this is a second lock on the door, not a wall.
+/// paired local apps to it). The systemd unit comes from the process's
+/// cgroup, which systemd sets and any reader can see. The executable path
+/// is only readable with ptrace rights over the peer, which a sandboxed
+/// daemon doesn't have over another user service, so it's often `None`.
+/// Any process of the same user can start the real program, so this is a
+/// second lock on the door, not a wall.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Peer {
     pub uid: u32,
     pub pid: Option<i32>,
     /// `/proc/<pid>/exe`, read right after accept; `None` if unreadable.
     pub exe: Option<PathBuf>,
+    /// The systemd unit (`peridot.service`, or an app scope) the process
+    /// runs in, from `/proc/<pid>/cgroup`; `None` outside systemd.
+    pub unit: Option<String>,
 }
 
 impl Peer {
@@ -47,8 +54,25 @@ impl Peer {
                     _ => p,
                 })
         });
-        Self { uid, pid, exe }
+        let unit = pid
+            .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok())
+            .and_then(|s| unit_from_cgroup(&s));
+        Self {
+            uid,
+            pid,
+            exe,
+            unit,
+        }
     }
+}
+
+/// The innermost systemd unit in a `/proc/<pid>/cgroup` listing (cgroup v2:
+/// one `0::/path` line).
+fn unit_from_cgroup(s: &str) -> Option<String> {
+    let path = s.lines().find_map(|l| l.strip_prefix("0::"))?.trim();
+    path.rsplit('/')
+        .find(|seg| seg.ends_with(".service") || seg.ends_with(".scope"))
+        .map(String::from)
 }
 
 /// What a daemon exposes on its socket.
@@ -222,10 +246,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn peer_reads_its_own_executable() {
+    fn peer_reads_its_own_executable_and_unit() {
         let uid = rustix::process::geteuid().as_raw();
         let me = Peer::for_pid(uid, Some(std::process::id() as i32));
         assert_eq!(me.exe, std::env::current_exe().ok());
-        assert_eq!(Peer::for_pid(uid, None).exe, None);
+        let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        assert_eq!(me.unit, unit_from_cgroup(&cgroup));
+        let none = Peer::for_pid(uid, None);
+        assert_eq!((none.exe, none.unit), (None, None));
+    }
+
+    #[test]
+    fn unit_is_the_innermost_service_or_scope() {
+        assert_eq!(
+            unit_from_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/peridot.service\n"
+            ),
+            Some("peridot.service".into())
+        );
+        assert_eq!(
+            unit_from_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-x.scope"
+            ),
+            Some("app-x.scope".into())
+        );
+        assert_eq!(unit_from_cgroup("0::/"), None);
+        assert_eq!(unit_from_cgroup("1:name=systemd:/x.service"), None);
     }
 }
