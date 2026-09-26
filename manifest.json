@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "derekross.opal",
   "name": "Opal",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Derek Ross",
   "license": "MIT",
   "description": "Nostr in your Omarchy bar: a NIP-46 signer (bunker) that keeps your nsec in the keyring, notifications (replies, mentions, zaps, DMs), and NIP-38 now-playing and status. Needs the opald daemon: run dist/install.sh.",

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use opal_core::ipc::IpcEvent;
+use opal_kit::ipc::Peer;
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -17,7 +18,16 @@ impl opal_kit::ipc::Service for App {
         method: String,
         params: Value,
     ) -> BoxFuture<'static, anyhow::Result<Value>> {
-        Box::pin(async move { api::dispatch(&self, &method, params).await })
+        Box::pin(async move { api::dispatch(&self, &Peer::default(), &method, params).await })
+    }
+
+    fn dispatch_with_peer(
+        self: Arc<Self>,
+        peer: Peer,
+        method: String,
+        params: Value,
+    ) -> BoxFuture<'static, anyhow::Result<Value>> {
+        Box::pin(async move { api::dispatch(&self, &peer, &method, params).await })
     }
 
     fn snapshot(self: Arc<Self>) -> BoxFuture<'static, Value> {

@@ -137,7 +137,19 @@ Item {
 
   function refreshApps() { call("apps.list", null, function(e, r) { if (!e) root.apps = r || [] }) }
   function refreshPrompts() { call("prompts.list", null, function(e, r) { if (!e) root.prompts = r || [] }) }
-  function refreshOffers() { call("nostrconnect.offers", null, function(e, r) { if (!e) root.offers = r || [] }) }
+  // Apps waiting to be approved: nostrconnect:// links and local programs
+  // (Peridot), in arrival order.
+  function refreshOffers() {
+    call("nostrconnect.offers", null, function(e, remote) {
+      if (e) return
+      call("app.offers", null, function(e2, local) {
+        if (e2) return
+        var all = (remote || []).map(function(o) { o.type = "nostrconnect"; return o }).concat(local || [])
+        all.sort(function(a, b) { return a.seq - b.seq })
+        root.offers = all
+      })
+    })
+  }
   function refreshConfig() { call("config.get", null, function(e, r) { if (!e) root.config = r || {} }) }
   function refreshActivity() {
     call("activity.list", { limit: 200 }, function(e, r) { if (!e) root.activity = r || [] })
@@ -218,6 +230,10 @@ Item {
     case "nostrconnect_offer":
       refreshOffers()
       showApproval()
+      break
+    case "app_offer":
+      refreshOffers()
+      if (msg.data && msg.data.type !== "closed") showApproval()
       break
     }
   }

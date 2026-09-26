@@ -25,6 +25,8 @@ pub enum ItemKind {
     DeviceIdentity,
     /// Peridot's random key for encrypting synced data, secret = hex.
     SyncSecret,
+    /// A local app's pairing token for opald (Peridot), secret = hex.
+    AppToken,
 }
 
 impl ItemKind {
@@ -35,6 +37,7 @@ impl ItemKind {
             Self::ClientKey => "client-key",
             Self::DeviceIdentity => "device-identity",
             Self::SyncSecret => "sync-secret",
+            Self::AppToken => "app-token",
         }
     }
 }

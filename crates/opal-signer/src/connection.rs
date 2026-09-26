@@ -37,12 +37,24 @@ pub struct Connection {
     pub expires_unused_at: Option<Timestamp>,
 }
 
+/// How an app reaches the signer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppKind {
+    /// Over relays, NIP-46.
+    Nip46,
+    /// A program on this computer, over the control socket.
+    Local,
+}
+
 /// What the UI and IPC see; never contains key material.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectionInfo {
     pub id: String,
+    pub kind: AppKind,
     pub account: String,
-    pub signer_pubkey: String,
+    /// The NIP-46 transport key; local apps have none.
+    pub signer_pubkey: Option<String>,
     pub client: Option<String>,
     pub connected: bool,
     pub name: Option<String>,
@@ -55,6 +67,11 @@ pub struct ConnectionInfo {
     pub created_at: u64,
     pub last_used: Option<u64>,
     pub expires_unused_at: Option<u64>,
+    /// Local apps: the program it was paired from, the kinds it declared,
+    /// and whether it may encrypt to the user's own key.
+    pub exe: Option<String>,
+    pub kinds: Vec<u16>,
+    pub nip44: bool,
 }
 
 impl Connection {
@@ -72,8 +89,9 @@ impl Connection {
     pub fn info(&self) -> ConnectionInfo {
         ConnectionInfo {
             id: self.id.clone(),
+            kind: AppKind::Nip46,
             account: self.account.to_hex(),
-            signer_pubkey: self.transport.public_key().to_hex(),
+            signer_pubkey: Some(self.transport.public_key().to_hex()),
             client: self.client.map(|c| c.to_hex()),
             connected: self.client.is_some(),
             name: self.name.clone(),
@@ -86,6 +104,9 @@ impl Connection {
             created_at: self.created_at.as_secs(),
             last_used: self.last_used.map(|t| t.as_secs()),
             expires_unused_at: self.expires_unused_at.map(|t| t.as_secs()),
+            exe: None,
+            kinds: Vec::new(),
+            nip44: false,
         }
     }
 

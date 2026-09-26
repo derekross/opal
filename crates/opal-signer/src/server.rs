@@ -49,6 +49,8 @@ pub enum SignerError {
     UnknownAccount,
     #[error("unknown app")]
     UnknownApp,
+    #[error("no signer store")]
+    NoStore,
 }
 
 /// Things the UI wants to hear about.
@@ -83,14 +85,14 @@ pub enum SignerEvent {
 
 #[derive(Clone)]
 pub struct Signer {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
-struct Inner {
+pub(crate) struct Inner {
     client: Client,
-    vault: Arc<Vault>,
-    conns: ConnStore,
-    store: Option<SignerStore>,
+    pub(crate) vault: Arc<Vault>,
+    pub(crate) conns: ConnStore,
+    pub(crate) store: Option<SignerStore>,
     approver: Arc<dyn Approver>,
     settings: SignerSettings,
     seen: Mutex<Seen>,
@@ -143,6 +145,71 @@ struct ClientMetadata {
 }
 
 type Reply = Result<String, String>;
+
+/// What a request wants done with the account key, once its parameters
+/// have been checked. Shared by NIP-46 apps and local apps.
+#[derive(Debug, Clone)]
+pub enum Op {
+    GetPublicKey,
+    SignEvent(UnsignedEvent),
+    /// NIP-04/NIP-44 encrypt or decrypt `text` with `with`.
+    Cipher {
+        method: Method,
+        with: PublicKey,
+        text: String,
+    },
+}
+
+impl Op {
+    pub fn method(&self) -> Method {
+        match self {
+            Self::GetPublicKey => Method::GetPublicKey,
+            Self::SignEvent(_) => Method::SignEvent,
+            Self::Cipher { method, .. } => method.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Outcome {
+    PublicKey(PublicKey),
+    Event(Event),
+    Text(String),
+}
+
+/// Who is asking: the part of an [`ApprovalRequest`] that comes from the
+/// app itself.
+#[derive(Debug, Clone)]
+pub(crate) struct Requester {
+    pub connection_id: String,
+    pub app_name: String,
+    pub app_url: Option<String>,
+    pub app_image: Option<String>,
+    pub account: PublicKey,
+    pub policy: Policy,
+}
+
+impl Requester {
+    fn nip46(c: &Connection) -> Self {
+        Self {
+            connection_id: c.id.clone(),
+            app_name: c.display_name(),
+            app_url: c.url.clone(),
+            app_image: c.image.clone(),
+            account: c.account,
+            policy: c.policy,
+        }
+    }
+}
+
+/// What to do when the vault is locked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WhenLocked {
+    /// Tell the UI once a minute and wait for an unlock (remote apps).
+    WaitAndNag,
+    /// Refuse at once, unlogged (local daemons that retry on their own).
+    FailFast,
+}
 
 impl Signer {
     /// A signer that keeps connections in memory only (tests, dev tools).
@@ -420,7 +487,7 @@ impl Signer {
 }
 
 impl Inner {
-    fn emit(&self, e: SignerEvent) {
+    pub(crate) fn emit(&self, e: SignerEvent) {
         let _ = self.events.send(e);
     }
 
@@ -437,7 +504,7 @@ impl Inner {
         }
     }
 
-    async fn check_account(&self, account: &PublicKey) -> Result<(), SignerError> {
+    pub(crate) async fn check_account(&self, account: &PublicKey) -> Result<(), SignerError> {
         if self.vault.accounts().await?.contains(account) {
             Ok(())
         } else {
@@ -667,22 +734,7 @@ impl Inner {
 
     /// Methods that use the account key: need an unlocked vault and approval.
     async fn guarded(&self, conn: &Connection, req: &Request) -> Reply {
-        let mut approval = ApprovalRequest {
-            connection_id: conn.id.clone(),
-            app_name: conn.display_name(),
-            app_url: conn.url.clone(),
-            app_image: conn.image.clone(),
-            account: conn.account,
-            policy: conn.policy,
-            method: req.method.clone(),
-            kind: None,
-            event: None,
-            counterparty: None,
-            payload_len: None,
-        };
-        let mut unsigned = None;
-        let mut payload = String::new();
-        match req.method {
+        let op = match req.method {
             Method::SignEvent => {
                 let t: EventTemplate = req
                     .param(0)
@@ -698,40 +750,91 @@ impl Inner {
                     .created_at
                     .map(Timestamp::from)
                     .unwrap_or_else(Timestamp::now);
-                let ev = UnsignedEvent::new(
+                Op::SignEvent(UnsignedEvent::new(
                     conn.account,
                     created_at,
                     Kind::from(t.kind),
                     tags,
                     t.content,
-                );
-                approval.kind = Some(t.kind);
-                approval.event = Some(ev.clone());
-                unsigned = Some(ev);
+                ))
             }
-            Method::GetPublicKey => {}
+            Method::GetPublicKey => Op::GetPublicKey,
             _ => {
                 let pk = req
                     .param(0)
                     .and_then(|p| PublicKey::parse(p).ok())
                     .ok_or("invalid public key")?;
-                payload = req.param(1).ok_or("missing text")?.to_string();
-                approval.counterparty = Some(pk);
-                approval.payload_len = Some(payload.len());
+                Op::Cipher {
+                    method: req.method.clone(),
+                    with: pk,
+                    text: req.param(1).ok_or("missing text")?.to_string(),
+                }
             }
+        };
+        match self
+            .authorize(Requester::nip46(conn), op, WhenLocked::WaitAndNag)
+            .await?
+        {
+            Outcome::PublicKey(pk) => Ok(pk.to_hex()),
+            Outcome::Event(e) => Ok(e.as_json()),
+            Outcome::Text(t) => Ok(t),
+        }
+    }
+
+    /// The shared path for anything that uses the account key: wait for an
+    /// unlock (or not), ask the approver, do the work, log it. Every request
+    /// ends in [`Inner::finish`] except a fail-fast refusal while locked.
+    pub(crate) async fn authorize(
+        &self,
+        who: Requester,
+        op: Op,
+        when_locked: WhenLocked,
+    ) -> Result<Outcome, String> {
+        let mut approval = ApprovalRequest {
+            connection_id: who.connection_id,
+            app_name: who.app_name,
+            app_url: who.app_url,
+            app_image: who.app_image,
+            account: who.account,
+            policy: who.policy,
+            method: op.method(),
+            kind: None,
+            event: None,
+            counterparty: None,
+            payload_len: None,
+        };
+        match &op {
+            Op::SignEvent(ev) => {
+                approval.kind = Some(ev.kind.as_u16());
+                approval.event = Some(ev.clone());
+            }
+            Op::Cipher { with, text, .. } => {
+                approval.counterparty = Some(*with);
+                approval.payload_len = Some(text.len());
+            }
+            Op::GetPublicKey => {}
         }
 
         let timeout = self.settings.pending_timeout;
         if !self.vault.is_unlocked() {
-            if self.unlock_nag_due(&conn.id).await {
-                self.emit(SignerEvent::UnlockNeeded {
-                    connection_id: conn.id.clone(),
-                    app_name: conn.display_name(),
-                    method: req.method.clone(),
-                });
-            }
-            if self.vault.wait_unlocked(timeout).await.is_err() {
-                return self.finish(&approval, Source::Locked, Err("signer is locked".into()));
+            match when_locked {
+                WhenLocked::FailFast => return Err("Opal is locked".into()),
+                WhenLocked::WaitAndNag => {
+                    if self.unlock_nag_due(&approval.connection_id).await {
+                        self.emit(SignerEvent::UnlockNeeded {
+                            connection_id: approval.connection_id.clone(),
+                            app_name: approval.app_name.clone(),
+                            method: approval.method.clone(),
+                        });
+                    }
+                    if self.vault.wait_unlocked(timeout).await.is_err() {
+                        return self.finish(
+                            &approval,
+                            Source::Locked,
+                            Err("signer is locked".into()),
+                        );
+                    }
+                }
             }
         }
 
@@ -745,34 +848,29 @@ impl Inner {
             Decision::Deny(s, reason) => return self.finish(&approval, s, Err(reason)),
         };
 
-        let keys = match self.vault.keys(&conn.account).await {
+        let keys = match self.vault.keys(&approval.account).await {
             Ok(k) => k,
             Err(_) => {
                 return self.finish(&approval, Source::Error, Err("signer unavailable".into()));
             }
         };
         let sk = keys.secret_key();
-        let cp = approval.counterparty;
-        let result: Reply = match req.method {
-            Method::GetPublicKey => Ok(conn.account.to_hex()),
-            Method::SignEvent => keys
-                .sign_event(unsigned.expect("parsed above"))
-                .map(|e| e.as_json())
+        let result: Result<Outcome, String> = match op {
+            Op::GetPublicKey => Ok(Outcome::PublicKey(approval.account)),
+            Op::SignEvent(unsigned) => keys
+                .sign_event(unsigned)
+                .map(Outcome::Event)
                 .map_err(|e| e.to_string()),
-            Method::Nip04Encrypt => {
-                nip04::encrypt(sk, &cp.expect("parsed"), &payload).map_err(|e| e.to_string())
+            Op::Cipher { method, with, text } => match method {
+                Method::Nip04Encrypt => nip04::encrypt(sk, &with, &text).map_err(|e| e.to_string()),
+                Method::Nip04Decrypt => nip04::decrypt(sk, &with, &text).map_err(|e| e.to_string()),
+                Method::Nip44Encrypt => {
+                    nip44::encrypt(sk, &with, &text, nip44::Version::V2).map_err(|e| e.to_string())
+                }
+                Method::Nip44Decrypt => nip44::decrypt(sk, &with, &text).map_err(|e| e.to_string()),
+                m => Err(format!("unsupported method: {m}")),
             }
-            Method::Nip04Decrypt => {
-                nip04::decrypt(sk, &cp.expect("parsed"), &payload).map_err(|e| e.to_string())
-            }
-            Method::Nip44Encrypt => {
-                nip44::encrypt(sk, &cp.expect("parsed"), &payload, nip44::Version::V2)
-                    .map_err(|e| e.to_string())
-            }
-            Method::Nip44Decrypt => {
-                nip44::decrypt(sk, &cp.expect("parsed"), &payload).map_err(|e| e.to_string())
-            }
-            _ => unreachable!(),
+            .map(Outcome::Text),
         };
         let source = if result.is_ok() {
             source
@@ -782,7 +880,12 @@ impl Inner {
         self.finish(&approval, source, result)
     }
 
-    fn finish(&self, approval: &ApprovalRequest, source: Source, result: Reply) -> Reply {
+    pub(crate) fn finish<T>(
+        &self,
+        approval: &ApprovalRequest,
+        source: Source,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
         let at = Timestamp::now().as_secs();
         let reason = result.as_ref().err().cloned();
         if self.settings.log_activity
@@ -879,7 +982,8 @@ pub fn clean_label(s: &str) -> String {
         .collect()
 }
 
-pub(crate) fn random_hex(bytes: usize) -> String {
+/// `bytes` random bytes as lowercase hex.
+pub fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::fill(&mut buf[..]);
     hex::encode(buf)

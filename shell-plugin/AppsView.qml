@@ -236,7 +236,9 @@ Column {
               color: root.dim
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
-              text: modelData.connected
+              text: modelData.kind === "local"
+                ? "Local app · " + (modelData.last_used ? "used " + U.ago(modelData.last_used, root.nowMs) : "not used yet") + " · " + modelData.policy
+                : modelData.connected
                 ? "Used " + U.ago(modelData.last_used, root.nowMs) + " · " + modelData.policy
                 : "Waiting for the app to connect"
             }
@@ -289,6 +291,12 @@ Column {
         var a = parent.app
         if (!a.id) return ""
         var parts = []
+        if (a.kind === "local") {
+          parts.push("A program on this computer")
+          parts.push("program: " + (a.exe || "unknown"))
+          parts.push("may ask for kinds " + (a.kinds || []).join(", ") + (a.nip44 ? " and its own encryption" : ""))
+          return parts.join(" · ")
+        }
         if (a.url) parts.push(a.url)
         parts.push(a.connected ? "connected" : "not connected yet")
         parts.push("relays: " + (a.relays || []).join(", "))

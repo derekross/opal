@@ -16,11 +16,72 @@ use opal_notify::{NotifyEngine, NotifyStore};
 use opal_status::{StatusEngine, StatusStore};
 
 use crate::signers::BunkerSigner;
+use opal_kit::ipc::Peer;
 use opal_signer::{
-    NostrConnectUri, PolicyApprover, PromptHub, Signer, SignerSettings, SignerStore,
+    ConnectionInfo, NostrConnectUri, PolicyApprover, PromptHub, Signer, SignerSettings,
+    SignerStore, kinds,
 };
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
+use zeroize::Zeroizing;
+
+/// A program on this computer asking to pair, waiting for the user. The
+/// request that made it is parked on `tx` until `app.accept`/`app.reject`.
+pub struct LocalOffer {
+    pub id: String,
+    pub seq: u64,
+    pub app_key: String,
+    pub name: String,
+    pub account: PublicKey,
+    pub kinds: Vec<u16>,
+    pub nip44: bool,
+    pub peer: Peer,
+    pub tx: oneshot::Sender<Result<(ConnectionInfo, Zeroizing<String>), String>>,
+}
+
+impl LocalOffer {
+    /// What the approval overlay shows. `perms` has the same shape as a
+    /// nostrconnect offer's, so the same toggles work.
+    pub fn describe(&self, account_label: Option<String>) -> Value {
+        let perms: Vec<Value> = opal_signer::grantable(&self.kinds, self.nip44)
+            .into_iter()
+            .map(|(m, k)| {
+                json!({
+                    "perm": match k { Some(k) => format!("{m}:{k}"), None => m.to_string() },
+                    "method": m,
+                    "kind": k,
+                    "label": k.map(kinds::label),
+                })
+            })
+            .collect();
+        let kinds: Vec<Value> = self
+            .kinds
+            .iter()
+            .map(|k| {
+                json!({
+                    "kind": k,
+                    "label": kinds::label(*k),
+                    "sensitive": opal_signer::permissions::is_sensitive(
+                        &opal_signer::protocol::Method::SignEvent, Some(*k)),
+                })
+            })
+            .collect();
+        json!({
+            "type": "local",
+            "id": self.id,
+            "seq": self.seq,
+            "app": self.app_key,
+            "name": self.name,
+            "exe": self.peer.exe.as_ref().map(|p| p.to_string_lossy()),
+            "pid": self.peer.pid,
+            "account": self.account.to_hex(),
+            "account_label": account_label,
+            "kinds": kinds,
+            "nip44": self.nip44,
+            "perms": perms,
+        })
+    }
+}
 
 pub struct App {
     pub config: RwLock<Config>,
@@ -39,6 +100,8 @@ pub struct App {
     /// `nostrconnect://` URIs handed to us (xdg handler, CLI) awaiting the UI.
     /// (client pubkey, arrival order, uri); kept in arrival order.
     pub offers: Mutex<Vec<(String, u64, NostrConnectUri)>>,
+    /// Local programs waiting to be paired (`app.connect`).
+    pub local_offers: Mutex<Vec<LocalOffer>>,
     offer_seq: std::sync::atomic::AtomicU64,
     /// Serializes module (re)starts so concurrent changes settle correctly.
     pub reconcile_lock: Mutex<()>,
@@ -59,6 +122,8 @@ pub struct Options {
     pub config_path: std::path::PathBuf,
     pub db: Db,
     pub store: SecretStore,
+    /// Passphrase hashing cost override; tests only (the default takes seconds).
+    pub vault_log_n: Option<u8>,
 }
 
 impl App {
@@ -68,8 +133,12 @@ impl App {
             config_path,
             db,
             store,
+            vault_log_n,
         } = opts;
-        let vault = Arc::new(Vault::new(store));
+        let vault = Arc::new(match vault_log_n {
+            Some(n) => Vault::with_log_n(store, n),
+            None => Vault::new(store),
+        });
         let accounts = Accounts::new(db.clone()).context("accounts table")?;
         // Keep account details in step with the keyring (e.g. after a restore).
         let now = nostr_sdk::prelude::Timestamp::now().as_secs();
@@ -106,6 +175,7 @@ impl App {
             online: AtomicBool::new(true),
             signer_started: AtomicBool::new(false),
             offers: Mutex::new(Vec::new()),
+            local_offers: Mutex::new(Vec::new()),
             offer_seq: std::sync::atomic::AtomicU64::new(1),
             reconcile_lock: Mutex::new(()),
             notify_store,
@@ -119,6 +189,21 @@ impl App {
 
     pub fn next_offer_seq(&self) -> u64 {
         self.offer_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// The name shown for an account in prompts.
+    pub fn account_label(&self, pk: &PublicKey) -> Option<String> {
+        self.accounts.get(pk).ok().flatten().map(|a| a.label())
+    }
+
+    /// Withdraw a local pairing offer (answered, or the asker gave up).
+    pub async fn take_local_offer(&self, id: &str) -> Option<LocalOffer> {
+        let mut offers = self.local_offers.lock().await;
+        let pos = offers.iter().position(|o| o.id == id)?;
+        let offer = offers.remove(pos);
+        drop(offers);
+        self.emit("app_offer", json!({"type": "closed", "id": id}));
+        Some(offer)
     }
 
     pub fn emit(&self, event: &str, data: Value) {

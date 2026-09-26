@@ -16,7 +16,8 @@ use crate::permissions::{Rule, Source};
 use crate::perms::PermSpec;
 use crate::protocol::Method;
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
     CREATE TABLE apps (
         id                TEXT PRIMARY KEY,
         account           TEXT NOT NULL,
@@ -60,7 +61,20 @@ const MIGRATIONS: &[&str] = &[r#"
         id TEXT PRIMARY KEY,
         at INTEGER NOT NULL
     );
-"#];
+"#,
+    // Local apps (programs on this computer, paired over the control socket)
+    // share the table so rules and activity work the same for them.
+    r#"
+    ALTER TABLE apps ADD COLUMN kind       TEXT NOT NULL DEFAULT 'nip46';
+    ALTER TABLE apps ADD COLUMN app_key    TEXT;
+    ALTER TABLE apps ADD COLUMN token_hash TEXT;
+    ALTER TABLE apps ADD COLUMN exe        TEXT;
+    ALTER TABLE apps ADD COLUMN kinds      TEXT;
+    ALTER TABLE apps ADD COLUMN nip44      INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX apps_app_key    ON apps(app_key)    WHERE app_key    IS NOT NULL;
+    CREATE UNIQUE INDEX apps_token_hash ON apps(token_hash) WHERE token_hash IS NOT NULL;
+"#,
+];
 
 /// An app as stored, without its transport secret key.
 #[derive(Debug, Clone)]
@@ -79,6 +93,28 @@ pub struct AppRecord {
     pub created_at: Timestamp,
     pub last_used: Option<Timestamp>,
     pub expires_unused_at: Option<Timestamp>,
+}
+
+/// A program on this computer that paired over the control socket. It has
+/// no transport key: the pairing token (stored as a SHA-256 hash) and the
+/// executable it was paired from identify it.
+#[derive(Debug, Clone)]
+pub struct LocalAppRecord {
+    pub id: String,
+    /// The id the program calls itself by (`peridot`); one row per key.
+    pub app_key: String,
+    pub name: String,
+    pub account: PublicKey,
+    pub policy: Policy,
+    /// Event kinds it declared when pairing; anything else is refused.
+    pub kinds: Vec<u16>,
+    /// May encrypt and decrypt to the user's own key (its private data).
+    pub nip44: bool,
+    /// `/proc/<pid>/exe` of the process that paired, if readable.
+    pub exe: Option<String>,
+    pub token_hash: String,
+    pub created_at: Timestamp,
+    pub last_used: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,7 +216,9 @@ impl SignerStore {
 
     pub fn load_apps(&self) -> Result<Vec<AppRecord>> {
         self.db.with(|c| {
-            let mut stmt = c.prepare("SELECT * FROM apps ORDER BY created_at DESC")?;
+            // Local apps have no transport key; they're loaded separately.
+            let mut stmt =
+                c.prepare("SELECT * FROM apps WHERE kind = 'nip46' ORDER BY created_at DESC")?;
             let rows = stmt.query_map([], app_from_row)?;
             let mut out = Vec::new();
             for r in rows {
@@ -198,6 +236,99 @@ impl SignerStore {
             c.execute("DELETE FROM apps WHERE id = ?1", [id])
                 .map(|_| ())
         })
+    }
+
+    /// Insert or replace a local app. Replacing keeps the row (and so the
+    /// rules' foreign key) and rotates everything the pairing decided.
+    pub fn save_local_app(&self, a: &LocalAppRecord) -> Result<()> {
+        let kinds = serde_json::to_string(&a.kinds).expect("kinds serialize");
+        self.db.with(|c| {
+            c.execute(
+                "INSERT INTO apps (id, account, transport_pubkey, name, relays, policy,
+                                   requested_perms, created_at, last_used,
+                                   kind, app_key, token_hash, exe, kinds, nip44)
+                 VALUES (?1, ?2, 'local:' || ?1, ?3, '[]', ?4, '[]', ?5, ?6,
+                         'local', ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(id) DO UPDATE SET
+                    account = excluded.account,
+                    name = excluded.name,
+                    policy = excluded.policy,
+                    last_used = excluded.last_used,
+                    app_key = excluded.app_key,
+                    token_hash = excluded.token_hash,
+                    exe = excluded.exe,
+                    kinds = excluded.kinds,
+                    nip44 = excluded.nip44",
+                params![
+                    a.id,
+                    a.account.to_hex(),
+                    a.name,
+                    policy_str(a.policy),
+                    a.created_at.as_secs() as i64,
+                    a.last_used.map(|t| t.as_secs() as i64),
+                    a.app_key,
+                    a.token_hash,
+                    a.exe,
+                    kinds,
+                    a.nip44,
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn local_apps(&self) -> Result<Vec<LocalAppRecord>> {
+        self.local_where("1", &[])
+    }
+
+    pub fn local_app(&self, id: &str) -> Result<Option<LocalAppRecord>> {
+        Ok(self.local_where("id = ?1", &[&id])?.pop())
+    }
+
+    pub fn local_app_by_key(&self, app_key: &str) -> Result<Option<LocalAppRecord>> {
+        Ok(self.local_where("app_key = ?1", &[&app_key])?.pop())
+    }
+
+    pub fn local_app_by_token_hash(&self, hash: &str) -> Result<Option<LocalAppRecord>> {
+        Ok(self.local_where("token_hash = ?1", &[&hash])?.pop())
+    }
+
+    fn local_where(
+        &self,
+        cond: &str,
+        args: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<LocalAppRecord>> {
+        self.db.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT * FROM apps WHERE kind = 'local' AND ({cond}) ORDER BY created_at DESC"
+            ))?;
+            let rows = stmt.query_map(args, local_app_from_row)?;
+            let mut out = Vec::new();
+            for r in rows {
+                if let Some(app) = r? {
+                    out.push(app);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Change a local app's name or policy.
+    pub fn update_local_app(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        policy: Option<Policy>,
+    ) -> Result<Option<LocalAppRecord>> {
+        self.db.with(|c| {
+            c.execute(
+                "UPDATE apps SET name = COALESCE(?2, name), policy = COALESCE(?3, policy)
+                 WHERE id = ?1 AND kind = 'local'",
+                params![id, name, policy.map(policy_str)],
+            )
+            .map(|_| ())
+        })?;
+        self.local_app(id)
     }
 
     pub fn rules(&self, app_id: &str) -> Result<Vec<Rule>> {
@@ -409,10 +540,144 @@ fn app_from_row(r: &Row<'_>) -> rusqlite::Result<Option<AppRecord>> {
     }))
 }
 
+fn local_app_from_row(r: &Row<'_>) -> rusqlite::Result<Option<LocalAppRecord>> {
+    let (Some(account), Some(app_key), Some(token_hash)) = (
+        r.get::<_, Option<String>>("account")?
+            .and_then(|s| PublicKey::from_hex(&s).ok()),
+        r.get::<_, Option<String>>("app_key")?,
+        r.get::<_, Option<String>>("token_hash")?,
+    ) else {
+        return Ok(None);
+    };
+    let kinds: Option<String> = r.get("kinds")?;
+    Ok(Some(LocalAppRecord {
+        id: r.get("id")?,
+        app_key,
+        name: r.get::<_, Option<String>>("name")?.unwrap_or_default(),
+        account,
+        policy: parse_policy(&r.get::<_, String>("policy")?),
+        kinds: kinds
+            .and_then(|k| serde_json::from_str(&k).ok())
+            .unwrap_or_default(),
+        nip44: r.get("nip44")?,
+        exe: r.get("exe")?,
+        token_hash,
+        created_at: Timestamp::from(r.get::<_, i64>("created_at")? as u64),
+        last_used: r
+            .get::<_, Option<i64>>("last_used")?
+            .map(|t| Timestamp::from(t as u64)),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nostr_sdk::prelude::Keys;
+
+    fn local(id: &str, key: &str) -> LocalAppRecord {
+        LocalAppRecord {
+            id: id.into(),
+            app_key: key.into(),
+            name: "Peridot".into(),
+            account: Keys::generate().public_key(),
+            policy: Policy::Basic,
+            kinds: vec![30078, 22242],
+            nip44: true,
+            exe: Some("/home/me/.local/bin/peridotd".into()),
+            token_hash: hash_secret(&format!("token-{id}")),
+            created_at: Timestamp::from(200),
+            last_used: None,
+        }
+    }
+
+    #[test]
+    fn local_apps_roundtrip_and_rules_cascade() {
+        let s = store();
+        let mut a = local("l1", "peridot");
+        s.save_local_app(&a).unwrap();
+        let got = s.local_app_by_key("peridot").unwrap().unwrap();
+        assert_eq!(got.id, "l1");
+        assert_eq!(got.kinds, vec![30078, 22242]);
+        assert!(got.nip44);
+        assert_eq!(got.exe.as_deref(), Some("/home/me/.local/bin/peridotd"));
+        assert_eq!(got.policy, Policy::Basic);
+        assert_eq!(
+            s.local_app_by_token_hash(&hash_secret("token-l1"))
+                .unwrap()
+                .map(|a| a.id),
+            Some("l1".into())
+        );
+        assert!(
+            s.local_app_by_token_hash(&hash_secret("nope"))
+                .unwrap()
+                .is_none()
+        );
+
+        s.put_rule(&Rule {
+            app_id: "l1".into(),
+            method: Method::SignEvent,
+            kind: Some(30078),
+            allow: true,
+            until: None,
+            created_at: 1,
+        })
+        .unwrap();
+        assert_eq!(s.rules("l1").unwrap().len(), 1);
+
+        // Re-pairing keeps the id and replaces what the pairing decided.
+        a.token_hash = hash_secret("token-2");
+        a.kinds = vec![30078];
+        a.exe = None;
+        s.save_local_app(&a).unwrap();
+        assert_eq!(s.local_apps().unwrap().len(), 1);
+        let got = s.local_app("l1").unwrap().unwrap();
+        assert_eq!(got.kinds, vec![30078]);
+        assert_eq!(got.exe, None);
+        assert!(
+            s.local_app_by_token_hash(&hash_secret("token-l1"))
+                .unwrap()
+                .is_none()
+        );
+
+        let updated = s
+            .update_local_app("l1", Some("Peri"), Some(Policy::Manual))
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.name, "Peri");
+        assert_eq!(updated.policy, Policy::Manual);
+
+        s.delete_app("l1").unwrap();
+        assert!(s.local_app("l1").unwrap().is_none());
+        assert!(s.rules("l1").unwrap().is_empty(), "rules go with the app");
+    }
+
+    #[test]
+    fn nip46_load_skips_local_rows() {
+        let s = store();
+        s.save_app(&app("a")).unwrap();
+        s.save_local_app(&local("l1", "peridot")).unwrap();
+        let nip46 = s.load_apps().unwrap();
+        assert_eq!(nip46.len(), 1);
+        assert_eq!(nip46[0].id, "a");
+        assert_eq!(s.local_apps().unwrap().len(), 1);
+        assert!(s.app_exists("l1").unwrap());
+    }
+
+    #[test]
+    fn migration_from_v1_keeps_rows() {
+        let db = Db::open_in_memory().unwrap();
+        db.migrate("signer", &MIGRATIONS[..1]).unwrap();
+        let a = app("old");
+        {
+            let s = SignerStore { db: db.clone() };
+            s.save_app(&a).unwrap();
+        }
+        let s = SignerStore::new(db).unwrap();
+        let loaded = s.load_apps().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "old");
+        assert!(s.local_apps().unwrap().is_empty());
+    }
 
     fn store() -> SignerStore {
         SignerStore::new(Db::open_in_memory().unwrap()).unwrap()

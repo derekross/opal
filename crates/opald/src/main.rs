@@ -75,6 +75,7 @@ async fn main() -> Result<()> {
         config_path,
         db,
         store,
+        vault_log_n: None,
     })
     .await?;
     tasks::spawn_all(&app);

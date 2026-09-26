@@ -2,7 +2,7 @@
 //! the current user can reach. Each daemon plugs in its own [`Service`].
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +17,40 @@ use zeroize::Zeroize;
 /// Longest request line we accept (a pasted key or URI fits easily).
 const MAX_LINE: usize = 64 * 1024;
 
+/// Who is on the other end of a connection: the socket's peer credentials
+/// plus what `/proc` says that process is running.
+///
+/// The uid is checked before any request is read; the rest is for daemons
+/// that want to know *which* of the user's programs is asking (Opal binds
+/// paired local apps to their executable). Any process of the same user can
+/// exec the real program, so this is a second lock on the door, not a wall.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Peer {
+    pub uid: u32,
+    pub pid: Option<i32>,
+    /// `/proc/<pid>/exe`, read right after accept; `None` if unreadable.
+    pub exe: Option<PathBuf>,
+}
+
+impl Peer {
+    /// Look the process up in `/proc` now, before its pid can be reused.
+    pub fn for_pid(uid: u32, pid: Option<i32>) -> Self {
+        let exe = pid.and_then(|pid| {
+            std::fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .map(|p| match p.to_str() {
+                    // A binary replaced by an upgrade while it runs shows as
+                    // deleted; it is still the same program at that path.
+                    Some(s) if s.ends_with(" (deleted)") => {
+                        PathBuf::from(s.trim_end_matches(" (deleted)"))
+                    }
+                    _ => p,
+                })
+        });
+        Self { uid, pid, exe }
+    }
+}
+
 /// What a daemon exposes on its socket.
 pub trait Service: Send + Sync + 'static {
     /// Handle one request.
@@ -25,6 +59,16 @@ pub trait Service: Send + Sync + 'static {
         method: String,
         params: Value,
     ) -> BoxFuture<'static, Result<Value>>;
+    /// Handle one request, knowing who sent it. Daemons that don't care
+    /// about the caller get the plain [`Service::dispatch`].
+    fn dispatch_with_peer(
+        self: Arc<Self>,
+        _peer: Peer,
+        method: String,
+        params: Value,
+    ) -> BoxFuture<'static, Result<Value>> {
+        self.dispatch(method, params)
+    }
     /// The full state, sent in reply to `subscribe`.
     fn snapshot(self: Arc<Self>) -> BoxFuture<'static, Value>;
     /// Events pushed to subscribed clients.
@@ -49,23 +93,23 @@ pub async fn serve<S: Service>(svc: Arc<S>, path: &Path, name: &str) -> Result<(
     let uid = rustix::process::geteuid().as_raw();
     loop {
         let (stream, _) = listener.accept().await?;
-        match stream.peer_cred() {
-            Ok(cred) if cred.uid() == uid => {}
+        let peer = match stream.peer_cred() {
+            Ok(cred) if cred.uid() == uid => Peer::for_pid(uid, cred.pid()),
             _ => {
                 tracing::warn!("rejected a connection from another user");
                 continue;
             }
-        }
+        };
         let svc = svc.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(svc, stream).await {
+            if let Err(e) = handle(svc, stream, peer).await {
                 tracing::debug!("client disconnected: {e}");
             }
         });
     }
 }
 
-async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream) -> Result<()> {
+async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream, peer: Peer) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<String>(64);
 
@@ -130,8 +174,9 @@ async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream) -> Result<()> {
         // external signer) doesn't hold up others on the same connection.
         let svc = svc.clone();
         let tx = tx.clone();
+        let peer = peer.clone();
         tokio::spawn(async move {
-            let resp = match svc.dispatch(req.method, req.params).await {
+            let resp = match svc.dispatch_with_peer(peer, req.method, req.params).await {
                 Ok(v) => IpcResponse {
                     id: req.id,
                     result: Some(v),
@@ -170,4 +215,17 @@ fn spawn_forwarder(mut events: broadcast::Receiver<IpcEvent>, tx: mpsc::Sender<S
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_reads_its_own_executable() {
+        let uid = rustix::process::geteuid().as_raw();
+        let me = Peer::for_pid(uid, Some(std::process::id() as i32));
+        assert_eq!(me.exe, std::env::current_exe().ok());
+        assert_eq!(Peer::for_pid(uid, None).exe, None);
+    }
 }

@@ -24,6 +24,8 @@ Item {
   readonly property color urgent: Color.urgent
 
   readonly property var offer: svc && svc.signerOn && svc.offers.length > 0 ? svc.offers[0] : null
+  // A program on this computer asking to pair (as opposed to a nostrconnect:// link).
+  readonly property bool localOffer: !!offer && offer.type === "local"
   readonly property var prompt: svc && svc.signerOn && svc.prompts.length > 0 ? svc.prompts[0] : null
   readonly property bool needUnlock: !!svc && svc.locked && svc.hasAccounts && (!!svc.unlockRequest || !!prompt)
   readonly property string mode: !svc ? "none"
@@ -104,17 +106,18 @@ Item {
     busy = true
     var grant = []
     for (var k in granted) if (granted[k]) grant.push(k)
-    svc.call("nostrconnect.accept", { offer_id: offer.id, policy: policy, grant: grant }, function(err, r) {
+    var local = localOffer
+    svc.call(local ? "app.accept" : "nostrconnect.accept", { offer_id: offer.id, policy: policy, grant: grant }, function(err, r) {
       root.busy = false
       if (err) { root.error = err; return }
-      root.svc.message("Connected " + (r.display_name || "app"), false)
+      root.svc.message((local ? "Paired " : "Connected ") + (r.display_name || "app"), false)
       root.svc.refreshOffers()
       root.svc.refreshApps()
     })
   }
   function rejectOffer() {
     if (!offer) return
-    svc.call("nostrconnect.reject", { id: offer.id }, function() { root.svc.refreshOffers() })
+    svc.call(localOffer ? "app.reject" : "nostrconnect.reject", { id: offer.id }, function() { root.svc.refreshOffers() })
   }
   function unlock() {
     if (busy || passField.text === "") return
@@ -232,7 +235,7 @@ Item {
                 text: {
                   switch (root.mode) {
                   case "unlock": return "Unlock Opal"
-                  case "offer": return (root.offer.name || "An app") + " wants to connect"
+                  case "offer": return (root.offer.name || "An app") + (root.localOffer ? " wants to use your key" : " wants to connect")
                   case "prompt": return root.prompt.app_name
                   }
                   return ""
@@ -250,6 +253,8 @@ Item {
                   case "unlock":
                     return root.svc.unlockRequest ? root.svc.unlockRequest.app_name + " is waiting for your signature" : "Requests are waiting"
                   case "offer":
+                    if (root.localOffer)
+                      return "A program on this computer · " + (root.offer.exe || ("unknown program (pid " + root.offer.pid + ")"))
                     return (root.offer.url ? root.offer.url + " (as the app claims) · " : "Unverified app · ")
                       + root.offer.relays.join(", ")
                   case "prompt":
@@ -288,7 +293,49 @@ Item {
               color: root.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.body
-              text: "It will sign as " + (root.svc && root.svc.currentAccount ? root.svc.currentAccount.label : "your account") + "."
+              text: "It will sign as " + (root.localOffer && root.offer.account_label ? root.offer.account_label
+                : root.svc && root.svc.currentAccount ? root.svc.currentAccount.label : "your account") + "."
+            }
+
+            // What a local program declared. Sensitive kinds (relay logins,
+            // Blossom uploads…) can't be pre-allowed: they always ask.
+            PanelSectionHeader {
+              visible: root.localOffer
+              text: "WHAT IT MAY ASK FOR"
+              foreground: root.dim
+            }
+            Repeater {
+              model: root.localOffer ? root.offer.kinds : []
+              delegate: Text {
+                required property var modelData
+                textFormat: Text.PlainText
+                width: parent ? parent.width : 0
+                wrapMode: Text.Wrap
+                color: root.foreground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                text: "Sign: " + modelData.label + " (kind " + modelData.kind + ")" + (modelData.sensitive ? " · always asks" : "")
+              }
+            }
+            Text {
+              textFormat: Text.PlainText
+              visible: root.localOffer && root.offer.nip44
+              width: parent.width
+              wrapMode: Text.Wrap
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              text: "Encrypt and decrypt its own data with your key (NIP-44) · decrypting asks"
+            }
+            Text {
+              textFormat: Text.PlainText
+              visible: root.localOffer
+              width: parent.width
+              wrapMode: Text.Wrap
+              color: root.dim
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              text: "Only this program, from this path, can use the pairing. You can change or revoke it under Apps."
             }
             PanelSectionHeader { text: "WHEN IT ASKS"; foreground: root.dim }
             ButtonGroup {
@@ -472,7 +519,7 @@ Item {
               onClicked: root.mode === "offer" ? root.rejectOffer() : root.answer(false)
             }
             Button {
-              text: root.mode === "unlock" ? "Unlock" : root.mode === "offer" ? "Connect" : "Approve"
+              text: root.mode === "unlock" ? "Unlock" : root.mode === "offer" ? (root.localOffer ? "Pair" : "Connect") : "Approve"
               iconText: root.mode === "unlock" ? "󰿆" : "󰄬"
               iconSpinning: root.busy
               bordered: true

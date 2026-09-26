@@ -679,7 +679,9 @@ fn print_apps(apps: &Value) {
             a["id"].as_str().unwrap_or(""),
             a["display_name"].as_str().unwrap_or(""),
             a["policy"].as_str().unwrap_or(""),
-            if a["connected"] == json!(true) {
+            if a["kind"] == json!("local") {
+                "local app"
+            } else if a["connected"] == json!(true) {
                 "connected"
             } else {
                 "waiting for app"

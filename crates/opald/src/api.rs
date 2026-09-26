@@ -5,23 +5,29 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use nostr_sdk::prelude::nip49::KeySecurity;
-use nostr_sdk::prelude::{Keys, PublicKey, SignEvent, Timestamp, ToBech32, UnsignedEvent, nip44};
+use nostr_sdk::prelude::{Keys, PublicKey, Timestamp, ToBech32, UnsignedEvent};
 use opal_core::config::{Config, Policy};
 use opal_core::import::{ImportOptions, parse_secret};
+use opal_kit::ipc::Peer;
 use opal_signer::kinds;
-use opal_signer::permissions::{Remember, Rule, Source, expand_perms};
+use opal_signer::permissions::{Remember, Rule, expand_perms};
 use opal_signer::protocol::Method;
-use opal_signer::store::{ActivityEntry, ActivityQuery};
-use opal_signer::{NostrConnectUri, PromptAnswer};
+use opal_signer::store::ActivityQuery;
+use opal_signer::{LocalPairing, NostrConnectUri, Op, Outcome, PromptAnswer};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
-use crate::app::{App, parse_relays};
+use crate::app::{App, LocalOffer, parse_relays};
 use crate::profiles;
 
+/// How long a local app's `app.connect` waits for the user.
+const LOCAL_PAIR_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Handle one request. `Err` becomes the response's `error` string.
-pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value> {
+/// `peer` is the process on the other end of the socket.
+pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) -> Result<Value> {
     match method {
         "ping" => Ok(json!("pong")),
         "status" => Ok(app.status().await),
@@ -62,9 +68,9 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let p: P = parse(params)?;
             require_passphrase(app, p.passphrase.as_ref()).await?;
             let pk = PublicKey::parse(&p.pubkey)?;
-            for c in app.signer.connections().await {
+            for c in app.signer.all_apps().await {
                 if c.account == pk.to_hex() {
-                    app.signer.remove_connection(&c.id).await?;
+                    app.signer.remove_app(&c.id).await?;
                 }
             }
             app.vault.remove_account(&pk).await?;
@@ -134,12 +140,12 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         // ── Apps ────────────────────────────────────────────────────────
-        "apps.list" => Ok(json!(app.signer.connections().await)),
+        "apps.list" => Ok(json!(app.signer.all_apps().await)),
         "apps.get" => {
             let p: Id = parse(params)?;
             let info = app
                 .signer
-                .connection(&p.id)
+                .app_info(&p.id)
                 .await
                 .ok_or(anyhow!("unknown app"))?;
             let rules = rules_json(app, &p.id)?;
@@ -195,13 +201,13 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             }
             let info = app
                 .signer
-                .update_connection(&p.id, p.name, p.policy, p.relays.map(|r| parse_relays(&r)))
+                .update_app(&p.id, p.name, p.policy, p.relays.map(|r| parse_relays(&r)))
                 .await?;
             Ok(json!(info))
         }
         "apps.remove" => {
             let p: Id = parse(params)?;
-            Ok(json!({"removed": app.signer.remove_connection(&p.id).await?}))
+            Ok(json!({"removed": app.signer.remove_app(&p.id).await?}))
         }
         "apps.set_rule" => {
             #[derive(Deserialize)]
@@ -463,65 +469,219 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({"online": p.online}))
         }
 
-        // ── Other apps on this computer (Peridot) ──────────────────────
-        // A local app may sign a few of its own kinds and encrypt to the
-        // user's own key, with no prompt: it runs as the same user and is
-        // limited to what it declares. Every use is in the activity log.
-        "app.sign" => {
+        // ── Apps on this computer (Peridot) ─────────────────────────────
+        // A local program pairs once (you approve it like any app, and see
+        // which executable asked) and gets a token. Each request then goes
+        // through the same policy, rules and prompts as a NIP-46 app; the
+        // token only says who is asking. The socket is same-user only, so
+        // the token and the executable check keep other programs from
+        // borrowing a pairing; they don't stop someone who is already you.
+        "app.connect" => {
+            require_signer(app).await?;
             #[derive(Deserialize)]
             struct P {
                 app: String,
+                name: String,
+                #[serde(default)]
+                kinds: Vec<u16>,
+                #[serde(default)]
+                nip44: bool,
                 pubkey: Option<String>,
+            }
+            let p: P = parse(params)?;
+            if !opal_signer::valid_app_key(&p.app) {
+                bail!("app must be 1-32 characters of a-z, 0-9 and -");
+            }
+            let name = opal_signer::server::clean_label(&p.name);
+            if name.is_empty() {
+                bail!("name required");
+            }
+            let mut kinds = p.kinds;
+            kinds.sort_unstable();
+            kinds.dedup();
+            if kinds.is_empty() && !p.nip44 {
+                bail!("declare at least one kind or nip44");
+            }
+            if kinds.len() > opal_signer::local::MAX_KINDS {
+                bail!("too many kinds (max {})", opal_signer::local::MAX_KINDS);
+            }
+            let account = account_or_current(app, p.pubkey.as_deref())?;
+            if !app.vault.accounts().await?.contains(&account) {
+                bail!("unknown account");
+            }
+            let (tx, rx) = oneshot::channel();
+            let id = {
+                let mut offers = app.local_offers.lock().await;
+                if offers.iter().any(|o| o.app_key == p.app) {
+                    bail!("that app is already waiting for your approval");
+                }
+                if offers.len() + app.offers.lock().await.len() >= 5 {
+                    bail!("too many apps waiting; answer those first");
+                }
+                let offer = LocalOffer {
+                    id: opal_signer::server::random_hex(8),
+                    seq: app.next_offer_seq(),
+                    app_key: p.app,
+                    name,
+                    account,
+                    kinds,
+                    nip44: p.nip44,
+                    peer: peer.clone(),
+                    tx,
+                };
+                let data = offer.describe(app.account_label(&account));
+                let id = offer.id.clone();
+                offers.push(offer);
+                drop(offers);
+                app.emit("app_offer", data);
+                id
+            };
+            // If the asker gives up first, the offer goes with it.
+            struct Withdraw(Arc<App>, String);
+            impl Drop for Withdraw {
+                fn drop(&mut self) {
+                    let (app, id) = (self.0.clone(), self.1.clone());
+                    tokio::spawn(async move {
+                        app.take_local_offer(&id).await;
+                    });
+                }
+            }
+            let _withdraw = Withdraw(app.clone(), id);
+            match tokio::time::timeout(LOCAL_PAIR_TIMEOUT, rx).await {
+                Ok(Ok(Ok((info, token)))) => {
+                    Ok(json!({"token": token.as_str(), "pubkey": info.account}))
+                }
+                Ok(Ok(Err(e))) => Err(anyhow!(e)),
+                Ok(Err(_)) => Err(anyhow!("declined")),
+                Err(_) => Err(anyhow!("timed out")),
+            }
+        }
+        "app.offers" => {
+            let offers = app.local_offers.lock().await;
+            let mut out = Vec::with_capacity(offers.len());
+            for o in offers.iter() {
+                out.push(o.describe(app.account_label(&o.account)));
+            }
+            Ok(json!(out))
+        }
+        "app.accept" => {
+            require_signer(app).await?;
+            #[derive(Deserialize)]
+            struct P {
+                offer_id: String,
+                policy: Option<Policy>,
+                /// `method` or `method:kind` strings to allow from now on.
+                #[serde(default)]
+                grant: Vec<String>,
+                passphrase: Option<Zeroizing<String>>,
+            }
+            let p: P = parse(params)?;
+            let policy = match p.policy {
+                Some(pol) => pol,
+                None => app.config.read().await.signer.default_policy,
+            };
+            if policy == Policy::FullTrust {
+                require_passphrase(app, p.passphrase.as_ref()).await?;
+            }
+            let offer = app
+                .take_local_offer(&p.offer_id)
+                .await
+                .ok_or(anyhow!("that request is gone"))?;
+            let grant = expand_perms(&opal_signer::perms::parse_perms(&p.grant.join(",")));
+            let pairing = LocalPairing {
+                app_key: offer.app_key,
+                name: offer.name,
+                account: offer.account,
+                policy,
+                kinds: offer.kinds,
+                nip44: offer.nip44,
+                exe: offer.peer.exe,
+                grant,
+            };
+            let result = app.signer.pair_local_app(pairing).await;
+            match result {
+                Ok((info, token)) => {
+                    let _ = offer.tx.send(Ok((info.clone(), token)));
+                    Ok(json!(info))
+                }
+                Err(e) => {
+                    let _ = offer.tx.send(Err(e.to_string()));
+                    Err(e.into())
+                }
+            }
+        }
+        "app.reject" => {
+            let p: Id = parse(params)?;
+            match app.take_local_offer(&p.id).await {
+                Some(offer) => {
+                    let _ = offer.tx.send(Err("declined".into()));
+                    Ok(json!({"removed": true}))
+                }
+                None => Ok(json!({"removed": false})),
+            }
+        }
+        "app.sign" => {
+            require_signer(app).await?;
+            #[derive(Deserialize)]
+            struct P {
+                token: Zeroizing<String>,
                 event: UnsignedEvent,
             }
             let p: P = parse(params)?;
-            let allowed = app_kinds(&p.app)?;
-            let kind = p.event.kind.as_u16();
-            if !allowed.contains(&kind) {
-                bail!("{} may not sign kind {kind} events", app_name(&p.app));
+            let paired = local_app(app, peer, &p.token)?;
+            match app
+                .signer
+                .local_request(&paired, Op::SignEvent(p.event))
+                .await
+                .map_err(|e| anyhow!(e))?
+            {
+                Outcome::Event(ev) => Ok(json!(ev)),
+                _ => bail!("unexpected result"),
             }
-            let pk = account_or_current(app, p.pubkey.as_deref())?;
-            if p.event.pubkey != pk {
-                bail!("the event isn't for that account");
-            }
-            let keys = app.vault.keys(&pk).await.map_err(|e| match e {
-                opal_core::Error::Locked => anyhow!("Opal is locked"),
-                e => anyhow!(e),
-            })?;
-            let ev = keys.sign_event(p.event)?;
-            // Not "activity": apps can't keep Opal unlocked, only you can.
-            log_app_use(app, &p.app, &pk, Method::SignEvent, Some(kind));
-            Ok(json!(ev))
         }
         "app.nip44" => {
+            require_signer(app).await?;
             #[derive(Deserialize)]
             struct P {
-                app: String,
-                pubkey: Option<String>,
+                token: Zeroizing<String>,
                 op: String,
                 content: String,
             }
             let p: P = parse(params)?;
-            app_kinds(&p.app)?;
-            let pk = account_or_current(app, p.pubkey.as_deref())?;
-            let keys = app.vault.keys(&pk).await.map_err(|e| match e {
-                opal_core::Error::Locked => anyhow!("Opal is locked"),
-                e => anyhow!(e),
-            })?;
-            // Only to the user's own key: enough for an app's private data.
-            let (out, method) = match p.op.as_str() {
-                "encrypt" => (
-                    nip44::encrypt(keys.secret_key(), &pk, &p.content, nip44::Version::V2)?,
-                    Method::Nip44Encrypt,
-                ),
-                "decrypt" => (
-                    nip44::decrypt(keys.secret_key(), &pk, &p.content)?,
-                    Method::Nip44Decrypt,
-                ),
+            let paired = local_app(app, peer, &p.token)?;
+            let method = match p.op.as_str() {
+                "encrypt" => Method::Nip44Encrypt,
+                "decrypt" => Method::Nip44Decrypt,
                 _ => bail!("op must be encrypt or decrypt"),
             };
-            log_app_use(app, &p.app, &pk, method, None);
-            Ok(json!({"content": out}))
+            // Only to the user's own key: enough for an app's private data.
+            let op = Op::Cipher {
+                method,
+                with: paired.account,
+                text: p.content,
+            };
+            match app
+                .signer
+                .local_request(&paired, op)
+                .await
+                .map_err(|e| anyhow!(e))?
+            {
+                Outcome::Text(out) => Ok(json!({"content": out})),
+                _ => bail!("unexpected result"),
+            }
+        }
+        "app.status" => {
+            #[derive(Deserialize)]
+            struct P {
+                token: Zeroizing<String>,
+            }
+            let p: P = parse(params)?;
+            let paired = local_app(app, peer, &p.token)?;
+            Ok(json!({
+                "pubkey": paired.account.to_hex(),
+                "name": paired.name,
+                "policy": paired.policy,
+            }))
         }
 
         "qr.svg" => {
@@ -940,44 +1100,19 @@ fn check_passphrase_strength(p: &str) -> Result<()> {
     Ok(())
 }
 
+/// The paired app behind a token, if the token is good and the caller is
+/// the program that paired.
+fn local_app(app: &App, peer: &Peer, token: &str) -> Result<opal_signer::LocalAppRecord> {
+    let paired = app
+        .signer
+        .local_app_by_token(token)
+        .ok_or(anyhow!("not paired"))?;
+    opal_signer::Signer::check_local_peer(&paired, peer.exe.as_deref()).map_err(|e| anyhow!(e))?;
+    Ok(paired)
+}
+
 /// Actions that weaken protection need the Opal passphrase, so another
 /// program running as you can't quietly do them through the socket.
-/// Event kinds a local app may sign, by app id.
-fn app_kinds(app: &str) -> Result<&'static [u16]> {
-    match app {
-        // Encrypted app data, deletions, its ephemeral pairing messages,
-        // relay authentication (NIP-42) and Blossom upload/delete auth
-        // (private share links).
-        "peridot" => Ok(&[30078, 5, 21078, 22242, 24242]),
-        _ => bail!("unknown app: {app}"),
-    }
-}
-
-fn app_name(app: &str) -> &'static str {
-    match app {
-        "peridot" => "Peridot",
-        _ => "an app",
-    }
-}
-
-fn log_app_use(app: &App, app_id: &str, account: &PublicKey, method: Method, kind: Option<u16>) {
-    if let Some(store) = app.signer.store() {
-        let _ = store.log_activity(&ActivityEntry {
-            id: 0,
-            at: Timestamp::now().as_secs(),
-            app_id: app_id.into(),
-            app_name: app_name(app_id).into(),
-            account: account.to_hex(),
-            method,
-            kind,
-            kind_label: None,
-            allowed: true,
-            source: Source::Automatic,
-            reason: None,
-        });
-    }
-}
-
 async fn require_passphrase(app: &App, given: Option<&Zeroizing<String>>) -> Result<()> {
     match given {
         Some(p) if !p.is_empty() => {
@@ -1102,6 +1237,336 @@ fn parse_or_default<T: for<'de> Deserialize<'de> + Default>(v: Value) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Options;
+    use opal_core::db::Db;
+    use opal_core::keystore::SecretStore;
+    use opal_signer::PromptEvent;
+    use std::path::PathBuf;
+
+    const PW: &str = "pw";
+
+    /// A daemon with one unlocked account, in memory; the signer module on,
+    /// no relays.
+    async fn test_app() -> (Arc<App>, PublicKey) {
+        let mut config = Config::default();
+        config.modules.signer = true;
+        config.signer.relays = vec![];
+        let app = App::new(Options {
+            config,
+            config_path: PathBuf::from("/nonexistent/opal.toml"),
+            db: Db::open_in_memory().unwrap(),
+            store: SecretStore::memory(),
+            vault_log_n: Some(4),
+        })
+        .await
+        .unwrap();
+        let pk = app.vault.add_account(Keys::generate(), PW).await.unwrap();
+        app.accounts.add(&pk, Some("Me"), 1).unwrap();
+        app.accounts.set_current(&pk).unwrap();
+        app.vault.unlock(PW).await.unwrap();
+        (app, pk)
+    }
+
+    fn peer(exe: &str) -> Peer {
+        Peer {
+            uid: 1000,
+            pid: Some(4242),
+            exe: Some(PathBuf::from(exe)),
+        }
+    }
+
+    async fn call(app: &Arc<App>, peer: &Peer, method: &str, params: Value) -> Result<Value> {
+        dispatch(app, peer, method, params).await
+    }
+
+    fn connect_params() -> Value {
+        json!({"app": "peridot", "name": "Peridot", "kinds": [30078, 24242], "nip44": true})
+    }
+
+    async fn wait_for_offer(app: &Arc<App>) -> Value {
+        for _ in 0..100 {
+            let offers = call(app, &Peer::default(), "app.offers", json!(null))
+                .await
+                .unwrap();
+            if let Some(o) = offers.as_array().and_then(|a| a.first()) {
+                return o.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no offer appeared");
+    }
+
+    /// Run `app.connect` from `exe` and accept it with `grant`; returns the token.
+    async fn pair(app: &Arc<App>, exe: &str, policy: &str, grant: Vec<&str>) -> String {
+        let connect = {
+            let (app, peer) = (app.clone(), peer(exe));
+            tokio::spawn(async move { call(&app, &peer, "app.connect", connect_params()).await })
+        };
+        let offer = wait_for_offer(app).await;
+        assert_eq!(offer["type"], json!("local"));
+        assert_eq!(offer["name"], json!("Peridot"));
+        assert_eq!(offer["exe"], json!(exe));
+        assert_eq!(offer["account_label"], json!("Me"));
+        let accepted = call(
+            app,
+            &Peer::default(),
+            "app.accept",
+            json!({"offer_id": offer["id"], "policy": policy, "grant": grant}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted["kind"], json!("local"));
+        let result = connect.await.unwrap().unwrap();
+        assert_eq!(result["pubkey"], accepted["account"]);
+        result["token"].as_str().unwrap().to_string()
+    }
+
+    fn unsigned(pk: PublicKey, kind: u16) -> Value {
+        json!(UnsignedEvent::new(
+            pk,
+            Timestamp::now(),
+            nostr_sdk::prelude::Kind::from(kind),
+            vec![],
+            "x"
+        ))
+    }
+
+    #[tokio::test]
+    async fn app_connect_accept_then_sign_and_status() {
+        let (app, pk) = test_app().await;
+        let mut events = app.events.subscribe();
+        let exe = "/home/me/.local/bin/peridotd";
+        let token = pair(&app, exe, "manual", vec!["sign_event:30078"]).await;
+        assert_eq!(token.len(), 64);
+        let opened = events.recv().await.unwrap();
+        assert_eq!(opened.event, "app_offer");
+        assert_eq!(opened.data["type"], json!("local"));
+
+        let signed = call(
+            &app,
+            &peer(exe),
+            "app.sign",
+            json!({"token": token, "event": unsigned(pk, 30078)}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(signed["pubkey"], json!(pk.to_hex()));
+        assert!(signed["sig"].is_string());
+
+        let status = call(&app, &peer(exe), "app.status", json!({"token": token}))
+            .await
+            .unwrap();
+        assert_eq!(status["pubkey"], json!(pk.to_hex()));
+        assert_eq!(status["name"], json!("Peridot"));
+        assert_eq!(status["policy"], json!("manual"));
+
+        let apps = call(&app, &Peer::default(), "apps.list", json!(null))
+            .await
+            .unwrap();
+        assert_eq!(apps[0]["kind"], json!("local"));
+        assert_eq!(apps[0]["exe"], json!(exe));
+        let get = call(
+            &app,
+            &Peer::default(),
+            "apps.get",
+            json!({"id": apps[0]["id"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(get["rules"].as_array().unwrap().len(), 1);
+
+        let activity = call(&app, &Peer::default(), "activity.list", json!(null))
+            .await
+            .unwrap();
+        assert_eq!(activity[0]["app_name"], json!("Peridot"));
+    }
+
+    #[tokio::test]
+    async fn app_sign_refuses_wrong_token_undeclared_kind_and_other_peer() {
+        let (app, pk) = test_app().await;
+        let exe = "/home/me/.local/bin/peridotd";
+        let token = pair(&app, exe, "basic", vec![]).await;
+        let sign = |peer: Peer, token: String, kind: u16| {
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    &peer,
+                    "app.sign",
+                    json!({"token": token, "event": unsigned(pk, kind)}),
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+        };
+        assert_eq!(
+            sign(peer(exe), "0".repeat(64), 30078).await.unwrap_err(),
+            "not paired"
+        );
+        assert_eq!(
+            sign(peer(exe), token.clone(), 1).await.unwrap_err(),
+            "Peridot didn't declare kind 1 when it paired"
+        );
+        let err = sign(peer("/tmp/evil"), token.clone(), 30078)
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("paired with a different program"), "{err}");
+        let err = sign(Peer::default(), token, 30078).await.unwrap_err();
+        assert!(err.starts_with("paired with a different program"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn app_reject_yields_declined_and_clears_the_offer() {
+        let (app, _) = test_app().await;
+        let connect = {
+            let (app, peer) = (app.clone(), peer("/x/peridotd"));
+            tokio::spawn(async move { call(&app, &peer, "app.connect", connect_params()).await })
+        };
+        let offer = wait_for_offer(&app).await;
+        // The same program can't queue a second request meanwhile.
+        let err = call(&app, &peer("/x/peridotd"), "app.connect", connect_params())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "that app is already waiting for your approval"
+        );
+        let r = call(
+            &app,
+            &Peer::default(),
+            "app.reject",
+            json!({"id": offer["id"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["removed"], json!(true));
+        assert_eq!(connect.await.unwrap().unwrap_err().to_string(), "declined");
+        let offers = call(&app, &Peer::default(), "app.offers", json!(null))
+            .await
+            .unwrap();
+        assert!(offers.as_array().unwrap().is_empty());
+        assert!(
+            call(&app, &Peer::default(), "apps.list", json!(null))
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn app_connect_validates_its_params() {
+        let (app, _) = test_app().await;
+        for (params, msg) in [
+            (
+                json!({"app": "Peridot", "name": "P", "kinds": [1]}),
+                "app must be",
+            ),
+            (
+                json!({"app": "peridot", "name": "  ", "kinds": [1]}),
+                "name required",
+            ),
+            (
+                json!({"app": "peridot", "name": "P"}),
+                "declare at least one kind",
+            ),
+            (
+                json!({"app": "peridot", "name": "P", "kinds": [1], "pubkey": Keys::generate().public_key().to_hex()}),
+                "unknown account",
+            ),
+        ] {
+            let err = call(&app, &peer("/x"), "app.connect", params)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().starts_with(msg), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_via_apps_remove_makes_status_not_paired() {
+        let (app, _) = test_app().await;
+        let exe = "/x/peridotd";
+        let token = pair(&app, exe, "basic", vec![]).await;
+        let apps = call(&app, &Peer::default(), "apps.list", json!(null))
+            .await
+            .unwrap();
+        let r = call(
+            &app,
+            &Peer::default(),
+            "apps.remove",
+            json!({"id": apps[0]["id"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["removed"], json!(true));
+        let err = call(&app, &peer(exe), "app.status", json!({"token": token}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "not paired");
+    }
+
+    #[tokio::test]
+    async fn sensitive_kind_prompts_through_the_prompt_hub() {
+        let (app, pk) = test_app().await;
+        let exe = "/x/peridotd";
+        let token = pair(&app, exe, "basic", vec![]).await;
+        // Answer the Blossom prompt like the overlay would.
+        let mut rx = app.prompts.subscribe();
+        let answerer = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                while let Ok(ev) = rx.recv().await {
+                    if let PromptEvent::Opened { prompt } = ev {
+                        assert_eq!(prompt.request.app_name, "Peridot");
+                        assert_eq!(prompt.request.kind, Some(24242));
+                        call(
+                            &app,
+                            &Peer::default(),
+                            "prompts.answer",
+                            json!({"id": prompt.id, "allow": true}),
+                        )
+                        .await
+                        .unwrap();
+                        return true;
+                    }
+                }
+                false
+            })
+        };
+        let signed = call(
+            &app,
+            &peer(exe),
+            "app.sign",
+            json!({"token": token, "event": unsigned(pk, 24242)}),
+        )
+        .await
+        .unwrap();
+        assert!(signed["sig"].is_string());
+        assert!(answerer.await.unwrap(), "a prompt was shown");
+        let activity = call(&app, &Peer::default(), "activity.list", json!(null))
+            .await
+            .unwrap();
+        assert_eq!(activity[0]["source"], json!("user"));
+        assert_eq!(activity[0]["kind"], json!(24242));
+    }
+
+    #[tokio::test]
+    async fn locked_daemon_refuses_local_requests_at_once() {
+        let (app, pk) = test_app().await;
+        let exe = "/x/peridotd";
+        let token = pair(&app, exe, "basic", vec!["sign_event:30078"]).await;
+        app.lock("test").await;
+        let err = call(
+            &app,
+            &peer(exe),
+            "app.sign",
+            json!({"token": token, "event": unsigned(pk, 30078)}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Opal is locked");
+    }
 
     #[test]
     fn merge_is_deep() {
