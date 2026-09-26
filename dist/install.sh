@@ -27,6 +27,26 @@ VERSION="$(jq -r .version manifest.json)"
 GITHUB_REPO="derekross/opal"
 PLUGIN_PATH="$PLUGINDIR/$PLUGIN_ID"
 
+MARKER=".installed-by-opal"
+UNIT="$UNITDIR/opal.service"
+
+die() { echo "$*" >&2; exit 1; }
+
+# Opal only replaces what it installed itself. Anything else at these paths
+# (another program's `opal` command, your own opal.service, a plugin
+# checkout) is left alone and the install stops.
+our_binary() { [[ ! -e $1 ]] || grep -qa "$2" "$1"; }
+our_unit() { [[ ! -e $UNIT ]] || grep -q "https://github.com/derekross/opal" "$UNIT"; }
+# A plugin folder this script copied: our marker, or (installs from before
+# the marker) a plain folder with Opal's manifest and service file.
+our_plugin_copy() {
+  local dir=$1 id=$2
+  [[ -d $dir && ! -L $dir ]] || return 1
+  [[ -f $dir/$MARKER ]] && return 0
+  [[ ! -e $dir/.git && -f $dir/OpalService.qml ]] \
+    && [[ "$(jq -r .id "$dir/manifest.json" 2>/dev/null)" == "$id" ]]
+}
+
 ask() {
   # ask "question" → 0 for yes. Non-interactive runs answer no.
   [[ -t 0 ]] || return 1
@@ -57,7 +77,7 @@ download_release() {
   name="opal-v$VERSION-$arch-linux"
   base="https://github.com/$GITHUB_REPO/releases/download/v$VERSION"
   dir="${XDG_CACHE_HOME:-$HOME/.cache}/opal/release"
-  rm -rf "$dir" && mkdir -p "$dir"
+  rm -rf "${dir:?}" && mkdir -p "$dir"
   echo "Downloading Opal v$VERSION ($arch)"
   curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/$name.tar.gz" "$base/$name.tar.gz"
   curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/SHA256SUMS" "$base/SHA256SUMS"
@@ -85,6 +105,21 @@ case $MODE in
   --prebuilt) download_release ;;
 esac
 
+# Check everything before changing anything.
+our_binary "$BINDIR/opald" "Opal daemon" \
+  || die "$BINDIR/opald exists and isn't Opal's. Move it aside, then run this again."
+our_binary "$BINDIR/opal" "Control the Opal Nostr signer" \
+  || die "$BINDIR/opal exists and isn't Opal's. Move it aside, then run this again."
+our_unit || die "$UNIT exists and isn't Opal's. Move it aside, then run this again."
+INSTALL_PLUGIN=1
+if (( FROM_PLUGIN_CHECKOUT )); then
+  INSTALL_PLUGIN=0
+elif [[ -e $PLUGIN_PATH || -L $PLUGIN_PATH ]] && ! our_plugin_copy "$PLUGIN_PATH" "$PLUGIN_ID"; then
+  INSTALL_PLUGIN=0
+  echo "Note: $PLUGIN_PATH exists and wasn't installed by this script"
+  echo "  (e.g. added with 'omarchy plugin add'); leaving it as it is."
+fi
+
 echo "Installing binaries to $BINDIR"
 install -Dm755 "$BIN_SRC/opald" "$BINDIR/opald"
 install -Dm755 "$BIN_SRC/opal" "$BINDIR/opal"
@@ -92,7 +127,7 @@ install -Dm755 "$BIN_SRC/opal" "$BINDIR/opal"
 mkdir -p -m 700 "$HOME/.local/share/opal" "$HOME/.config/opal" "$HOME/.cache/opal"
 
 echo "Installing the systemd user service"
-install -Dm644 dist/opal.service "$UNITDIR/opal.service"
+install -Dm644 dist/opal.service "$UNIT"
 systemctl --user daemon-reload
 systemctl --user enable opal.service >/dev/null
 systemctl --user restart opal.service
@@ -111,26 +146,32 @@ else
 fi
 
 # Earlier versions installed the plugin under the id "opal".
-if [[ $PLUGIN_ID != "opal" && -d "$PLUGINDIR/opal" && -f "$PLUGINDIR/opal/OpalService.qml" ]]; then
+if [[ $PLUGIN_ID != "opal" ]] && our_plugin_copy "$PLUGINDIR/opal" "opal"; then
   echo "Removing the older 'opal' plugin install"
   omarchy plugin disable opal >/dev/null 2>&1 || true
-  rm -rf "$PLUGINDIR/opal"
+  rm -rf "${PLUGINDIR:?}/opal"
 fi
 
 if (( FROM_PLUGIN_CHECKOUT )); then
   echo "Shell plugin: installed by 'omarchy plugin add' ($PLUGIN_ID)"
-else
+elif (( INSTALL_PLUGIN )); then
   echo "Installing the Omarchy shell plugin ($PLUGIN_ID)"
   mkdir -p "$PLUGINDIR"
   # Copied, not linked: the shell's file watcher doesn't follow symlinks.
-  rm -rf "$PLUGIN_PATH.new"
-  cp -r shell-plugin "$PLUGIN_PATH.new"
+  # Built next to the destination, then swapped in.
+  staging="$(mktemp -d "$PLUGINDIR/.$PLUGIN_ID.XXXXXX")"
+  cp -r shell-plugin/. "$staging/"
   # The repo's single manifest points into shell-plugin/; here the files sit
   # at the top of the plugin folder.
   jq '.entryPoints |= with_entries(.value |= ltrimstr("shell-plugin/"))' manifest.json \
-    >"$PLUGIN_PATH.new/manifest.json"
-  rm -rf "$PLUGIN_PATH"
-  mv "$PLUGIN_PATH.new" "$PLUGIN_PATH"
+    >"$staging/manifest.json"
+  echo "https://github.com/derekross/opal" >"$staging/$MARKER"
+  chmod 755 "$staging"
+  if [[ -e $PLUGIN_PATH ]]; then
+    # Only reached for our own earlier copy (checked above).
+    rm -rf "${PLUGIN_PATH:?}"
+  fi
+  mv "$staging" "$PLUGIN_PATH"
 fi
 if command -v omarchy >/dev/null; then
   omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true

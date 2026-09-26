@@ -1,3 +1,5 @@
+# Installed by Opal (https://github.com/derekross/opal); install.sh and
+# uninstall.sh only replace or remove this file while this line is here.
 [Unit]
 Description=Opal Nostr signer
 Documentation=https://github.com/derekross/opal
