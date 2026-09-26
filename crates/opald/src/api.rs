@@ -946,8 +946,9 @@ fn check_passphrase_strength(p: &str) -> Result<()> {
 fn app_kinds(app: &str) -> Result<&'static [u16]> {
     match app {
         // Encrypted app data, deletions, its ephemeral pairing messages,
-        // and relay authentication (NIP-42).
-        "peridot" => Ok(&[30078, 5, 21078, 22242]),
+        // relay authentication (NIP-42) and Blossom upload/delete auth
+        // (private share links).
+        "peridot" => Ok(&[30078, 5, 21078, 22242, 24242]),
         _ => bail!("unknown app: {app}"),
     }
 }
