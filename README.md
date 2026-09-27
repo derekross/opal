@@ -102,8 +102,10 @@ if it matches the hash pinned in the checkout itself
 attestation was verified, with the source commit the attestation names), so
 the bytes you run are tied to a reviewed commit rather than to whatever the
 release page holds today; when the GitHub CLI is signed in it verifies the
-attestation again. A checkout without a pin for its version refuses the
-download and says so. Choose explicitly with `install.sh --build` or
+attestation again. The pin includes the tarball's size, and the download is
+bounded to it (and to sane connect, total and stall limits), so a stalled or
+oversized response can't hang the install or fill the cache. A checkout
+without a pin for its version refuses the download and says so. Choose explicitly with `install.sh --build` or
 `install.sh --prebuilt`. To check a download yourself:
 `gh attestation verify opal-v0.3.1-x86_64-linux.tar.gz --repo derekross/opal`.
 

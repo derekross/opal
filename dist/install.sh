@@ -66,11 +66,19 @@ download_release() {
   name="opal-v$VERSION-$arch-linux"
   base="https://github.com/$GITHUB_REPO/releases/download/v$VERSION"
   dir="$CACHEDIR/release"
-  [[ -n "$(pinned_release "$name.tar.gz")" ]] \
+  local pin size
+  pin="$(pinned_release "$name.tar.gz")"
+  [[ -n $pin ]] \
     || die "This checkout has no pinned checksum for $name.tar.gz (a release is pinned in dist/release-checksums.tsv after it is published). Build from source with --build, or use a newer checkout."
+  size="${pin##* }"
   rm -rf -- "${dir:?}" && mkdir -p -- "$dir"
-  say "Downloading Opal v$VERSION ($arch)"
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/$name.tar.gz" "$base/$name.tar.gz"
+  say "Downloading Opal v$VERSION ($arch, $size bytes)"
+  # Bounded: 20 s to connect, 15 min in all, give up below 1 KiB/s for a
+  # minute, and never take more than the pinned size (curl stops at once).
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    --connect-timeout 20 --max-time 900 --speed-limit 1024 --speed-time 60 \
+    --max-filesize "$size" -o "$dir/$name.tar.gz" "$base/$name.tar.gz" \
+    || { rc=$?; rm -f -- "$dir/$name.tar.gz"; die "Download failed (curl exit $rc$( (( rc == 63 )) && printf ': larger than the pinned %s bytes' "$size")); nothing installed."; }
   verify_pinned "$dir/$name.tar.gz" "$name.tar.gz" \
     || die "Not installing $name.tar.gz: it isn't the release this checkout was reviewed with."
   note "Checksum matches the one pinned in this checkout (built from $PINNED_COMMIT)"

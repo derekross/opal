@@ -7,7 +7,7 @@
 # Needs a signed-in GitHub CLI. For each tarball: downloads it, verifies its
 # build-provenance attestation, checks the attestation names this
 # repository's release workflow at that tag and the tag's own commit, and
-# records "<sha256>\t<asset>\t<commit>". Commit the result.
+# records "<sha256>\t<asset>\t<commit>\t<size>". Commit the result.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 GITHUB_REPO="derekross/opal"
@@ -28,11 +28,12 @@ for arch in x86_64 aarch64; do
   [[ $workflow == "https://github.com/$GITHUB_REPO@refs/tags/$tag" ]] || { echo "  attestation is for $workflow, not this tag" >&2; exit 1; }
   [[ $commit == "$expected_commit" ]] || { echo "  attestation names commit $commit, tag is at $expected_commit" >&2; exit 1; }
   sha="$(sha256sum -- "$dir/$asset" | cut -d' ' -f1)"
+  size="$(stat -c %s -- "$dir/$asset")"
   if grep -qF -- "	$asset	" "$TABLE" 2>/dev/null; then
-    grep -qF -- "$sha	$asset	$commit" "$TABLE" && { echo "  already pinned"; continue; }
-    echo "  $asset is already pinned with a different hash; a release must not change" >&2; exit 1
+    grep -qF -- "$sha	$asset	$commit	$size" "$TABLE" && { echo "  already pinned"; continue; }
+    echo "  $asset is already pinned with a different hash or size; a release must not change" >&2; exit 1
   fi
-  printf '%s\t%s\t%s\n' "$sha" "$asset" "$commit" >>"$TABLE"
-  echo "  pinned $sha (built from $commit)"
+  printf '%s\t%s\t%s\t%s\n' "$sha" "$asset" "$commit" "$size" >>"$TABLE"
+  echo "  pinned $sha, $size bytes (built from $commit)"
 done
 echo "Now commit $TABLE."

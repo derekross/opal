@@ -509,28 +509,34 @@ mimeapps_remove_opal() {
 # commit can't. Each pin also names the source commit the build attestation
 # vouched for when the pin was made.
 RELEASE_CHECKSUMS="${OPAL_RELEASE_CHECKSUMS:-dist/release-checksums.tsv}"
-# pinned_release <asset>: prints "<sha256> <source commit>" or nothing.
+# pinned_release <asset>: prints "<sha256> <source commit> <size>" or nothing.
 pinned_release() {
-  local h a c
+  local h a c z
   [[ -f $RELEASE_CHECKSUMS ]] || return 0
-  while IFS=$'\t' read -r h a c || [[ -n $h ]]; do
+  while IFS=$'\t' read -r h a c z || [[ -n $h ]]; do
     [[ $h == \#* || -z $a ]] && continue
-    [[ $a == "$1" && $h =~ ^[0-9a-f]{64}$ ]] && { printf '%s %s\n' "$h" "$c"; return 0; }
+    [[ $a == "$1" && $h =~ ^[0-9a-f]{64}$ && $z =~ ^[0-9]+$ ]] && { printf '%s %s %s\n' "$h" "$c" "$z"; return 0; }
   done <"$RELEASE_CHECKSUMS"
 }
-# verify_pinned <file> <asset>: 0 if the file is exactly the pinned bytes.
+# verify_pinned <file> <asset>: 0 if the file is exactly the pinned bytes
+# (size first, so an oversized file is never even hashed).
 verify_pinned() {
-  local pin
+  local pin h c z
   pin="$(pinned_release "$2")"
   if [[ -z $pin ]]; then
     note "no pinned checksum for $2 in $RELEASE_CHECKSUMS."
     return 1
   fi
-  if [[ "$(file_hash "$1")" != "${pin%% *}" ]]; then
+  read -r h c z <<<"$pin"
+  if [[ "$(stat -c %s -- "$1" 2>/dev/null || echo -1)" != "$z" ]]; then
+    note "$2 isn't the pinned size ($z bytes)."
+    return 1
+  fi
+  if [[ "$(file_hash "$1")" != "$h" ]]; then
     note "$2 doesn't match the checksum pinned in this checkout."
     return 1
   fi
-  PINNED_COMMIT="${pin#* }"
+  PINNED_COMMIT=$c
 }
 PINNED_COMMIT=
 
