@@ -55,6 +55,50 @@ our_plugin_copy() {
   [[ ! -e $dir/.git && -f $dir/OpalService.qml ]] \
     && [[ "$(jq -r .id "$dir/manifest.json" 2>/dev/null)" == "$id" ]]
 }
+# The plugin copy. The marker's first line is Opal's URL; the lines after it
+# are `sha256sum` lines for every file this script put there. A file is
+# Opal's to replace or remove only while it still matches its line; a file
+# that was edited, or added, is yours and stays. Copies from before the
+# hash lines (a marker with the URL only, or none) can't be checked file by
+# file: the files Opal ships are replaced, anything else is kept.
+plugin_hashes() { [[ -f $1/$MARKER ]] || return 0; sed -n '2,$p' "$1/$MARKER"; }
+recorded_hash() { plugin_hashes "$1" | awk -v f="$2" '$2 == f { print $1 }'; }
+file_hash() { sha256sum "$1" | cut -d' ' -f1; }
+
+# Carry what's yours in `old` over into `staging` (the new copy), so the
+# swap below loses nothing: Opal's unchanged files are the ones replaced.
+merge_plugin_copy() {
+  local old=$1 staging=$2 legacy=0 rel recorded
+  [[ -n "$(plugin_hashes "$old")" ]] || legacy=1
+  while IFS= read -r -d '' rel; do
+    [[ $rel == "$MARKER" ]] && continue
+    recorded="$(recorded_hash "$old" "$rel")"
+    if [[ -n $recorded ]]; then
+      [[ "$(file_hash "$old/$rel")" == "$recorded" ]] && continue   # Opal's, unchanged
+      echo "  keeping $rel: you changed it (Opal's version isn't installed)"
+      # Yours now: drop it from the list of Opal's files.
+      sed -i "\|  ${rel//|/\\|}\$|d" "$staging/$MARKER"
+    elif (( legacy )) && [[ -f $staging/$rel ]]; then
+      continue   # a file Opal ships, from before the hash lines
+    else
+      echo "  keeping $rel: not Opal's"
+    fi
+    mkdir -p "$staging/$(dirname "$rel")"
+    cp -p "$old/$rel" "$staging/$rel"
+  done < <(cd "$old" && find . -type f -printf '%P\0')
+}
+
+# Remove the files Opal put in `dir` and still match; keep the rest.
+remove_plugin_copy() {
+  local dir=$1 rel recorded
+  while IFS= read -r -d '' rel; do
+    recorded="$(recorded_hash "$dir" "$rel")"
+    [[ -n $recorded && "$(file_hash "$dir/$rel")" == "$recorded" ]] && rm -f "$dir/$rel"
+  done < <(cd "$dir" && find . -type f ! -name "$MARKER" -printf '%P\0')
+  rm -f "$dir/$MARKER"
+  find "$dir" -depth -type d -empty -delete
+  [[ ! -e $dir ]] || echo "  kept $dir: it holds files that aren't Opal's (or were changed)"
+}
 
 ask() {
   # ask "question" → 0 for yes. Non-interactive runs answer no.
@@ -167,7 +211,7 @@ fi
 if [[ $PLUGIN_ID != "opal" ]] && our_plugin_copy "$PLUGINDIR/opal" "opal"; then
   echo "Removing the older 'opal' plugin install"
   omarchy plugin disable opal >/dev/null 2>&1 || true
-  rm -rf "${PLUGINDIR:?}/opal"
+  remove_plugin_copy "$PLUGINDIR/opal"
 fi
 
 if (( FROM_PLUGIN_CHECKOUT )); then
@@ -183,10 +227,17 @@ elif (( INSTALL_PLUGIN )); then
   # at the top of the plugin folder.
   jq '.entryPoints |= with_entries(.value |= ltrimstr("shell-plugin/"))' manifest.json \
     >"$staging/manifest.json"
-  echo "https://github.com/derekross/opal" >"$staging/$MARKER"
+  # Record what Opal put there, before anything of yours is carried over.
+  {
+    echo "https://github.com/derekross/opal"
+    (cd "$staging" && find . -type f ! -name "$MARKER" -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum)
+  } >"$staging/$MARKER"
   chmod 755 "$staging"
   if [[ -e $PLUGIN_PATH ]]; then
-    # Only reached for our own earlier copy (checked above).
+    # Only reached for our own earlier copy (checked above). Everything in
+    # it is either Opal's and unchanged (replaced by the new copy) or yours
+    # (carried into the new copy), so the old folder can go.
+    merge_plugin_copy "$PLUGIN_PATH" "$staging"
     rm -rf "${PLUGIN_PATH:?}"
   fi
   mv "$staging" "$PLUGIN_PATH"

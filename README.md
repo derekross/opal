@@ -51,7 +51,7 @@ Opal holds your nsec, so it's built to be careful:
 - **Remote apps get nothing without a connection**, and only what their policy or you allow once connected. Strangers get no reply at all.
 - **Untrusted text is only ever shown as plain text** in the panel and in popups; images are https-only.
 - **Hardened systemd unit**: no capabilities, seccomp filter, read-only home except Opal's own directories.
-- **The installer only touches what it installed.** The binaries, the service unit and the plugin copy each carry a mark, and the `nostrconnect://` launcher is only replaced or removed while it is exactly what the installer wrote (edit it and it's yours). Anything else at those paths is left alone, and for the binaries and unit the install stops. Changing the default `nostrconnect://` handler asks first.
+- **The installer only touches what it installed.** The binaries and the service unit carry a mark; the `nostrconnect://` launcher and every file in the plugin copy are only replaced or removed while they are exactly what the installer wrote (the plugin copy's `.installed-by-opal` lists their hashes). Edit a file and it's yours; add one and it stays. Anything else at those paths is left alone, and for the binaries and unit the install stops. Changing the default `nostrconnect://` handler asks first.
 
 ## Requirements
 

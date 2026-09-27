@@ -21,6 +21,43 @@ our_plugin_copy() {
   [[ ! -e $dir/.git && -f $dir/OpalService.qml ]] \
     && [[ "$(jq -r .id "$dir/manifest.json" 2>/dev/null)" == "$id" ]]
 }
+# The plugin copy. The marker's first line is Opal's URL; the lines after it
+# are `sha256sum` lines for every file this script put there. A file is
+# Opal's to replace or remove only while it still matches its line; a file
+# that was edited, or added, is yours and stays. Copies from before the
+# hash lines (a marker with the URL only, or none) can't be checked file by
+# file: the files Opal ships are replaced, anything else is kept.
+plugin_hashes() { [[ -f $1/$MARKER ]] || return 0; sed -n '2,$p' "$1/$MARKER"; }
+recorded_hash() { plugin_hashes "$1" | awk -v f="$2" '$2 == f { print $1 }'; }
+file_hash() { sha256sum "$1" | cut -d' ' -f1; }
+
+# What this checkout would have installed as `rel`, for copies from before
+# the hash lines: only a file identical to it is removed.
+shipped_file() {
+  local rel=$1
+  if [[ $rel == manifest.json ]]; then
+    jq '.entryPoints |= with_entries(.value |= ltrimstr("shell-plugin/"))' manifest.json 2>/dev/null
+  elif [[ -f shell-plugin/$rel ]]; then
+    cat "shell-plugin/$rel"
+  fi
+}
+
+# Remove the files Opal put in `dir` and still match; keep the rest.
+remove_plugin_copy() {
+  local dir=$1 legacy=0 rel recorded
+  [[ -n "$(plugin_hashes "$dir")" ]] || legacy=1
+  while IFS= read -r -d '' rel; do
+    recorded="$(recorded_hash "$dir" "$rel")"
+    if [[ -n $recorded ]]; then
+      [[ "$(file_hash "$dir/$rel")" == "$recorded" ]] && rm -f "$dir/$rel"
+    elif (( legacy )) && cmp -s "$dir/$rel" <(shipped_file "$rel"); then
+      rm -f "$dir/$rel"
+    fi
+  done < <(cd "$dir" && find . -type f ! -name "$MARKER" -printf '%P\0')
+  rm -f "$dir/$MARKER"
+  find "$dir" -depth -type d -empty -delete
+  [[ ! -e $dir ]] || echo "  kept $dir: it holds files that aren't Opal's (or were changed)"
+}
 # The launcher is removed only if it is exactly what install.sh writes (now,
 # or before the X-Opal-Source line): an edited one is yours to keep.
 render_launcher() { sed "s|@BINDIR@|$HOME/.local/bin|g" dist/opal-nostrconnect.desktop; }
@@ -74,7 +111,7 @@ fi
 for dir in "$PLUGINDIR/$PLUGIN_ID:$PLUGIN_ID" "$PLUGINDIR/opal:opal"; do
   path="${dir%%:*}"
   if our_plugin_copy "$path" "${dir#*:}"; then
-    rm -rf "${path:?}"
+    remove_plugin_copy "$path"
   elif [[ -e $path && $path == "$PLUGINDIR/$PLUGIN_ID" ]]; then
     # e.g. added with `omarchy plugin add`: that command removes it.
     echo "  $path wasn't installed by install.sh; remove it with: omarchy plugin remove $PLUGIN_ID"
