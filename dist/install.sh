@@ -14,8 +14,11 @@
 #                                 backup); repeat for the other
 #
 # Release binaries are built by GitHub Actions from the tag matching this
-# checkout's version, and checked against the release's SHA256SUMS (and its
-# build attestation too, when the GitHub CLI is signed in).
+# checkout's version. A download is accepted only if it matches the hash
+# pinned in this checkout (dist/release-checksums.tsv, added after each
+# release once its build attestation was verified), so the bytes are tied
+# to a reviewed commit, not to what the release page holds today. When the
+# GitHub CLI is signed in the attestation is checked again as well.
 #
 # Run it again after `git pull` / `omarchy plugin update` to update.
 #
@@ -63,17 +66,18 @@ download_release() {
   name="opal-v$VERSION-$arch-linux"
   base="https://github.com/$GITHUB_REPO/releases/download/v$VERSION"
   dir="$CACHEDIR/release"
+  [[ -n "$(pinned_release "$name.tar.gz")" ]] \
+    || die "This checkout has no pinned checksum for $name.tar.gz (a release is pinned in dist/release-checksums.tsv after it is published). Build from source with --build, or use a newer checkout."
   rm -rf -- "${dir:?}" && mkdir -p -- "$dir"
   say "Downloading Opal v$VERSION ($arch)"
   curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/$name.tar.gz" "$base/$name.tar.gz"
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/SHA256SUMS" "$base/SHA256SUMS"
-  (cd "$dir" && grep -F -- "  $name.tar.gz" SHA256SUMS | sha256sum --check --status) \
-    || die "Checksum mismatch for $name.tar.gz; not installing it."
-  note "Checksum OK"
+  verify_pinned "$dir/$name.tar.gz" "$name.tar.gz" \
+    || die "Not installing $name.tar.gz: it isn't the release this checkout was reviewed with."
+  note "Checksum matches the one pinned in this checkout (built from $PINNED_COMMIT)"
   if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
     gh attestation verify "$dir/$name.tar.gz" --repo "$GITHUB_REPO" >/dev/null \
       || die "Build attestation check failed; not installing it."
-    note "Built by GitHub Actions from $GITHUB_REPO (attestation verified)"
+    note "Build attestation verified as well (GitHub Actions, $GITHUB_REPO)"
   fi
   tar -xzf "$dir/$name.tar.gz" -C "$dir"
   BIN_SRC="$dir/$name"

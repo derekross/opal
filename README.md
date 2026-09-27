@@ -96,9 +96,14 @@ each. The old file is moved to `~/.local/state/opal/backup/` and never deleted.
 **Binaries.** With Rust installed, `install.sh` builds from source. Without it,
 it downloads the release matching the plugin's version from
 [GitHub Releases](https://github.com/derekross/opal/releases). Each release is
-built by GitHub Actions from its tag. The installer checks the download against
-the release's `SHA256SUMS`, and against its build attestation too when the
-GitHub CLI is signed in. Choose explicitly with `install.sh --build` or
+built by GitHub Actions from its tag. The installer accepts the download only
+if it matches the hash pinned in the checkout itself
+(`dist/release-checksums.tsv`, added after each release once its build
+attestation was verified, with the source commit the attestation names), so
+the bytes you run are tied to a reviewed commit rather than to whatever the
+release page holds today; when the GitHub CLI is signed in it verifies the
+attestation again. A checkout without a pin for its version refuses the
+download and says so. Choose explicitly with `install.sh --build` or
 `install.sh --prebuilt`. To check a download yourself:
 `gh attestation verify opal-v0.3.1-x86_64-linux.tar.gz --repo derekross/opal`.
 
@@ -253,7 +258,11 @@ To release, bump the version in `manifest.json` and `Cargo.toml`, run
 every file each version installs), commit, then
 `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow checks that all three
 versions match and the table covers the tag, runs the tests, and publishes
-the binaries.
+the binaries. Then `./dist/pin-release.sh vX.Y.Z` (needs a signed-in GitHub
+CLI): it downloads the tarballs, verifies their build attestations and that
+they were built from the tag's commit, and pins their hashes in
+`dist/release-checksums.tsv`; commit that, and the no-Rust install for that
+version works from then on.
 
 The plugin's service is `keepLoaded`, so changes to `OpalService.qml` need
 `omarchy-restart-shell`. For experiments, run a separate daemon that can't

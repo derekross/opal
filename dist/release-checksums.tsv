@@ -1,0 +1,5 @@
+# Release tarballs the installer may use, pinned here so the reviewed commit vouches
+# for the exact bytes: sha256, asset, and the source commit its build attestation names.
+# Added with dist/pin-release.sh after each release; do not edit by hand.
+dac6f39408757d7e7cc7638b17e0d0de0e7d1a37f43f5f6015281b46a35dc1bb	opal-v0.3.1-x86_64-linux.tar.gz	6b94e3490f580b52b03120c617164fea32478ea0
+f290253c56adeefc003637e76b934429006db98147ccaf740ddd455a80f50b58	opal-v0.3.1-aarch64-linux.tar.gz	6b94e3490f580b52b03120c617164fea32478ea0
