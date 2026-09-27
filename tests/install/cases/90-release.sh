@@ -16,15 +16,23 @@ expect "same size, other bytes refused" not check "$HOME/asset.tar.gz" opal-v9.9
 expect "unpinned asset refused" not check "$HOME/asset.tar.gz" opal-v9.9.9-aarch64-linux.tar.gz && said "no pinned checksum" && ok
 unset OPAL_RELEASE_CHECKSUMS
 
-case_ "2. the shipped table pins this version's tarballs for both architectures, built from the tag's commit"
+case_ "2. every pinned tarball is well formed and names its tag's commit; the manifest's version is pinned once released"
 v="$(jq -r .version "$ROOT/manifest.json")"
-for a in x86_64 aarch64; do
-  line="$(grep -F "	opal-v$v-$a-linux.tar.gz	" "$ROOT/dist/release-checksums.tsv" || true)"
-  expect "pinned $a" [ -n "$line" ] &&
-  expect "hash shape" grep -qE '^[0-9a-f]{64}	' <<<"$line" &&
-  expect "commit is the tag's" [ "$(cut -f3 <<<"$line")" = "$(cd "$ROOT" && git rev-parse "v$v^{commit}")" ] &&
-  expect "size pinned" grep -qE '	[0-9]+$' <<<"$line" && ok
-done
+n=0
+while IFS=$'\t' read -r h a c z; do
+  [[ $h == \#* || -z $a ]] && continue
+  n=$((n + 1)); tag="${a#opal-}"; tag="${tag%%-*}"
+  expect "hash shape ($a)" grep -qE '^[0-9a-f]{64}$' <<<"$h" &&
+  expect "size pinned ($a)" grep -qE '^[0-9]+$' <<<"$z" &&
+  { ! (cd "$ROOT" && git rev-parse -q --verify "$tag^{commit}" >/dev/null 2>&1) \
+    || expect "commit is the tag's ($a)" [ "$c" = "$(cd "$ROOT" && git rev-parse "$tag^{commit}")" ]; }
+done <"$ROOT/dist/release-checksums.tsv"
+expect "at least one pinned release" [ "$n" -gt 0 ] && ok
+if grep -qF "	opal-v$v-x86_64-linux.tar.gz	" "$ROOT/dist/release-checksums.tsv"; then
+  expect "both architectures pinned for $v" grep -qF "	opal-v$v-aarch64-linux.tar.gz	" "$ROOT/dist/release-checksums.tsv" && ok
+else
+  echo "   ok (v$v isn't pinned yet: dist/pin-release.sh runs after the release is published)"
+fi
 
 case_ "3. install --prebuilt refuses before downloading when this version isn't pinned"
 fresh; export OPAL_RELEASE_CHECKSUMS="$HOME/empty.tsv"; : >"$HOME/empty.tsv"
