@@ -60,6 +60,15 @@ Item {
   property var config: ({})
   // An app is waiting for an unlock (cleared once unlocked).
   property var unlockRequest: null
+  // The UI session token opald hands out when the passphrase is verified
+  // (by unlock, or by signing in after the shell restarted). Kept in memory
+  // only and sent with every request; without it the daemon answers only
+  // the bar's counts, because any program running as you can reach it.
+  property string uiToken: ""
+  readonly property bool signedIn: uiToken !== ""
+  // Unlocked, but this shell hasn't proven the passphrase yet.
+  readonly property bool needSignIn: hasAccounts && !locked && !signedIn
+  onUiTokenChanged: if (uiToken !== "") refreshAll()
   // The last bunker URI created from the panel, shown until dismissed.
   property var lastBunker: null
 
@@ -84,8 +93,22 @@ Item {
       if (done) done("Opal isn't connected yet", null)
       return
     }
-    sock.write(JSON.stringify({ id: id, method: method, params: params === undefined ? null : params }) + "\n")
+    var p = params === undefined ? null : params
+    if (root.uiToken !== "" && (p === null || (typeof p === "object" && !Array.isArray(p)))) {
+      p = Object.assign({}, p || {})
+      if (p.ui_token === undefined) p.ui_token = root.uiToken
+    }
+    sock.write(JSON.stringify({ id: id, method: method, params: p }) + "\n")
     sock.flush()
+  }
+
+  // Prove the passphrase without unlocking (the shell restarted while Opal
+  // was unlocked, say). unlock() hands the token out too.
+  function signIn(passphrase, done) {
+    call("authenticate", { passphrase: passphrase }, function(err, r) {
+      if (!err && r && r.ui_token) root.uiToken = r.ui_token
+      if (done) done(err)
+    })
   }
 
   // A change the daemon only makes with the Opal passphrase (full trust,
@@ -109,13 +132,17 @@ Item {
   function confirmGuarded(passphrase) {
     var g = guarded
     if (!g) return
-    var p = Object.assign({}, g.params)
-    p.passphrase = passphrase
-    call(g.method, p, function(err, result) {
+    // The same passphrase signs this shell in, if it hasn't yet.
+    signIn(passphrase, function(err) {
       if (err) { root.guardError = err; return }
-      root.guarded = null
-      root.guardError = ""
-      if (g.onOk) g.onOk(result)
+      var p = Object.assign({}, g.params)
+      p.passphrase = passphrase
+      call(g.method, p, function(err2, result) {
+        if (err2) { root.guardError = err2; return }
+        root.guarded = null
+        root.guardError = ""
+        if (g.onOk) g.onOk(result)
+      })
     })
   }
 
@@ -187,6 +214,7 @@ Item {
   function handle(msg) {
     if (msg.id !== undefined && msg.id !== null) {
       var cb = _callbacks[msg.id]
+      if (msg.result && typeof msg.result === "object" && msg.result.ui_token) root.uiToken = msg.result.ui_token
       if (cb) {
         delete _callbacks[msg.id]
         cb(msg.error || null, msg.result)
@@ -199,6 +227,10 @@ Item {
       if (!locked) unlockRequest = null
       notifyDebounce.restart()
       statusDebounce.restart()
+      break
+    case "pending":
+      // Before signing in the daemon only says how many are waiting.
+      if (!signedIn && msg.data && msg.data.count > 0) showApproval()
       break
     case "signer":
       var d = msg.data || {}

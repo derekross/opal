@@ -28,11 +28,16 @@ Item {
   readonly property bool localOffer: !!offer && offer.type === "local"
   readonly property var prompt: svc && svc.signerOn && svc.prompts.length > 0 ? svc.prompts[0] : null
   readonly property bool needUnlock: !!svc && svc.locked && svc.hasAccounts && (!!svc.unlockRequest || !!prompt)
+  // Requests are waiting but this shell can't see them until it proves the
+  // passphrase (it restarted while Opal was unlocked).
+  readonly property bool needSignIn: !!svc && svc.needSignIn && ((svc.status.pending_prompts || 0) > 0)
   readonly property string mode: !svc ? "none"
     : needUnlock ? "unlock"
+    : needSignIn ? "unlock"
     : offer ? "offer"
     : prompt ? "prompt"
     : "none"
+  readonly property bool signingIn: mode === "unlock" && !!svc && !svc.locked
 
   property string remember: "once"
   property bool showRaw: false
@@ -123,11 +128,13 @@ Item {
     if (busy || passField.text === "") return
     busy = true
     error = ""
-    svc.call("unlock", { passphrase: passField.text }, function(err) {
+    var done = function(err) {
       root.busy = false
       passField.text = ""
       if (err) { root.error = err; Qt.callLater(root.focusDefault) }
-    })
+    }
+    if (signingIn) svc.signIn(passField.text, done)
+    else svc.call("unlock", { passphrase: passField.text }, done)
   }
 
   readonly property string eventPreview: {
@@ -234,7 +241,7 @@ Item {
                 font.bold: true
                 text: {
                   switch (root.mode) {
-                  case "unlock": return "Unlock Opal"
+                  case "unlock": return root.signingIn ? "Sign in to Opal" : "Unlock Opal"
                   case "offer": return (root.offer.name || "An app") + (root.localOffer ? " wants to use your key" : " wants to connect")
                   case "prompt": return root.prompt.app_name
                   }
@@ -251,6 +258,7 @@ Item {
                 text: {
                   switch (root.mode) {
                   case "unlock":
+                    if (root.signingIn) return "Requests are waiting; your passphrase lets this panel show them"
                     return root.svc.unlockRequest ? root.svc.unlockRequest.app_name + " is waiting for your signature" : "Requests are waiting"
                   case "offer":
                     if (root.localOffer)
@@ -530,7 +538,7 @@ Item {
               onClicked: root.mode === "offer" ? root.rejectOffer() : root.answer(false)
             }
             Button {
-              text: root.mode === "unlock" ? "Unlock" : root.mode === "offer" ? (root.localOffer ? "Pair" : "Connect") : "Approve"
+              text: root.mode === "unlock" ? (root.signingIn ? "Sign in" : "Unlock") : root.mode === "offer" ? (root.localOffer ? "Pair" : "Connect") : "Approve"
               iconText: root.mode === "unlock" ? "󰿆" : "󰄬"
               iconSpinning: root.busy
               bordered: true

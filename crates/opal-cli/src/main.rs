@@ -161,10 +161,14 @@ enum AccountCmd {
     Remove { pubkey: String },
 }
 
+/// Must match opald's wording (crates/opald/src/api.rs).
+const NEEDS_UI: &str = "sign in with your Opal passphrase first";
+
 struct Conn {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: tokio::net::unix::OwnedWriteHalf,
     next_id: u64,
+    signed_in: bool,
 }
 
 impl Conn {
@@ -180,10 +184,27 @@ impl Conn {
             reader: BufReader::new(r),
             writer: w,
             next_id: 1,
+            signed_in: false,
         })
     }
 
+    /// A request; if opald asks for the UI session first (a privileged
+    /// method from a connection that hasn't proven the passphrase), ask
+    /// for the passphrase, sign this connection in, and try again.
     async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        match self.raw_call(method, params.clone()).await {
+            Err(e) if e.to_string() == NEEDS_UI && !self.signed_in => {
+                let passphrase = rpassword::prompt_password("Opal passphrase: ")?;
+                self.raw_call("authenticate", json!({"passphrase": passphrase}))
+                    .await?;
+                self.signed_in = true;
+                self.raw_call(method, params).await
+            }
+            other => other,
+        }
+    }
+
+    async fn raw_call(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         let req = IpcRequest {

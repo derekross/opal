@@ -32,7 +32,7 @@ Item {
   implicitHeight: column.implicitHeight
 
   function focusDefault() {
-    if (up && svc.hasAccounts && svc.locked) unlockCard.focusField()
+    if (up && svc.hasAccounts && (svc.locked || svc.needSignIn)) unlockCard.focusField()
     else keyCatcher.forceActiveFocus()
   }
 
@@ -253,7 +253,7 @@ Item {
         UnlockCard {
           id: unlockCard
           width: parent.width
-          visible: root.up && root.svc.hasAccounts && root.svc.locked
+          visible: root.up && root.svc.hasAccounts && (root.svc.locked || root.svc.needSignIn)
           svc: root.svc
           foreground: root.foreground
           urgent: root.urgent

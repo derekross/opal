@@ -2,10 +2,13 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Passphrase entry shown while the vault is locked.
+// Passphrase entry: unlocks the vault, or, when it is already unlocked but
+// this shell hasn't shown the passphrase yet (it restarted), signs in so
+// requests and apps are visible again.
 Column {
   id: root
   property var svc: null
+  readonly property bool signIn: !!svc && !svc.locked
   property color foreground: Color.foreground
   property color urgent: Color.urgent
   property bool busy: false
@@ -19,14 +22,16 @@ Column {
     if (busy || field.text === "") return
     busy = true
     error = ""
-    svc.call("unlock", { passphrase: field.text }, function(err) {
+    var done = function(err) {
       root.busy = false
       field.text = ""
       if (err) {
         root.error = err
         root.focusField()
       }
-    })
+    }
+    if (signIn) svc.signIn(field.text, done)
+    else svc.call("unlock", { passphrase: field.text }, done)
   }
 
   onVisibleChanged: if (visible) focusField()
@@ -38,7 +43,9 @@ Column {
     color: root.foreground
     font.family: Style.font.family
     font.pixelSize: Style.font.body
-    text: root.svc && root.svc.unlockRequest
+    text: root.signIn
+      ? "Opal is unlocked, but this panel needs your passphrase to show requests and apps again."
+      : root.svc && root.svc.unlockRequest
       ? root.svc.unlockRequest.app_name + " is waiting. Unlock to continue."
       : "Unlock to sign with your keys."
   }
@@ -59,7 +66,7 @@ Column {
     Button {
       id: unlockButton
       anchors.verticalCenter: field.verticalCenter
-      text: root.busy ? "Unlocking" : "Unlock"
+      text: root.busy ? (root.signIn ? "Signing in" : "Unlocking") : (root.signIn ? "Sign in" : "Unlock")
       iconText: "󰿆"
       iconSpinning: root.busy
       bordered: true

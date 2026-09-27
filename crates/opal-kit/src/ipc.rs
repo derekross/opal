@@ -28,7 +28,7 @@ const MAX_LINE: usize = 64 * 1024;
 /// daemon doesn't have over another user service, so it's often `None`.
 /// Any process of the same user can start the real program, so this is a
 /// second lock on the door, not a wall.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Peer {
     pub uid: u32,
     pub pid: Option<i32>,
@@ -37,6 +37,26 @@ pub struct Peer {
     /// The systemd unit (`peridot.service`, or an app scope) the process
     /// runs in, from `/proc/<pid>/cgroup`; `None` outside systemd.
     pub unit: Option<String>,
+    /// State a daemon keeps per connection, shared with the event forwarder
+    /// (opald: whether the caller has shown the UI session token).
+    #[serde(skip)]
+    pub session: Arc<Session>,
+}
+
+/// Per-connection state. `privileged` means whatever the daemon says it does.
+#[derive(Debug, Default)]
+pub struct Session {
+    privileged: std::sync::atomic::AtomicBool,
+}
+
+impl Session {
+    pub fn is_privileged(&self) -> bool {
+        self.privileged.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn set_privileged(&self) {
+        self.privileged
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl Peer {
@@ -62,6 +82,7 @@ impl Peer {
             pid,
             exe,
             unit,
+            session: Arc::new(Session::default()),
         }
     }
 }
@@ -97,6 +118,11 @@ pub trait Service: Send + Sync + 'static {
     fn snapshot(self: Arc<Self>) -> BoxFuture<'static, Value>;
     /// Events pushed to subscribed clients.
     fn events(&self) -> broadcast::Receiver<IpcEvent>;
+    /// What of an event a connection may see: the event, a redacted copy,
+    /// or nothing. Daemons that don't care pass everything on.
+    fn filter_event(&self, _peer: &Peer, event: &IpcEvent) -> Option<IpcEvent> {
+        Some(event.clone())
+    }
 }
 
 /// Serve `svc` on `path` until the listener fails. `name` is used in the
@@ -182,7 +208,7 @@ async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream, peer: Peer) -> Resu
         if req.method == "subscribe" {
             if !subscribed {
                 subscribed = true;
-                spawn_forwarder(svc.events(), tx.clone());
+                spawn_forwarder(svc.clone(), peer.clone(), tx.clone());
             }
             let resp = IpcResponse {
                 id: req.id,
@@ -223,13 +249,17 @@ async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream, peer: Peer) -> Resu
     Ok(())
 }
 
-fn spawn_forwarder(mut events: broadcast::Receiver<IpcEvent>, tx: mpsc::Sender<String>) {
+fn spawn_forwarder<S: Service>(svc: Arc<S>, peer: Peer, tx: mpsc::Sender<String>) {
+    let mut events = svc.events();
     tokio::spawn(async move {
         loop {
             let ev: IpcEvent = match events.recv().await {
                 Ok(e) => e,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => break,
+            };
+            let Some(ev) = svc.filter_event(&peer, &ev) else {
+                continue;
             };
             let Ok(line) = serde_json::to_string(&ev) else {
                 continue;

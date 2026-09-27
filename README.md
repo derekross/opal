@@ -47,7 +47,7 @@ Opal holds your nsec, so it's built to be careful:
 - **Encrypted at rest.** Keys go into the Secret Service (gnome-keyring) *only* as NIP-49 `ncryptsec` (scrypt, N=2^18). Omarchy's keyring has no password of its own, so your Opal passphrase is what protects the key. New passphrases must pass a strength check.
 - **In memory only while unlocked.** Keys are wiped when Opal locks: after a timeout you choose, when the screen locks, and before suspend. Only your own approvals count as activity; apps can't keep it unlocked.
 - **No leaks from the process.** Core dumps are off and other processes of your user can't read the daemon's memory.
-- **Local control socket** (`$XDG_RUNTIME_DIR/opal.sock`) is `0600`; the daemon checks the caller's user id and records which program connected. Any program running as you can reach it, so reaching it grants nothing by itself: signing needs a pairing you approved (see [Local apps](#local-apps)), and changes that weaken protection (full trust for an app, permanent allow rules, turning auto-lock off, deleting a key) need your passphrase. Wrong passphrases back off.
+- **Local control socket** (`$XDG_RUNTIME_DIR/opal.sock`) is `0600` and the daemon checks the caller's user id, but any program running as you can reach it, so reaching it grants nothing by itself. Anything that grants authority or shows content (answering a request, accepting an app, editing apps and rules, accounts, settings, reading requests, activity or messages) needs the **UI session token**, which the daemon hands out only when the passphrase is verified: the panel gets it when you unlock (or sign in after the shell restarted) and keeps it in memory only; the `opal` command asks for the passphrase when it needs it. Without the token a connection gets the bar's counts and nothing else, and the event stream is redacted the same way. Programs on this computer sign only through a pairing you approved (see [Local apps](#local-apps)), and changes that weaken protection (full trust for an app, permanent allow rules, turning auto-lock off, deleting a key) need the passphrase again. Wrong passphrases back off. What this can't stop: a program running as you that reads the panel's memory or logs your keystrokes; on Omarchy, Yama's ptrace scope keeps the former to a process's own children.
 - **Remote apps get nothing without a connection**, and only what their policy or you allow once connected. Strangers get no reply at all.
 - **Untrusted text is only ever shown as plain text** in the panel and in popups; images are https-only.
 - **Hardened systemd unit**: no capabilities, seccomp filter, read-only home except Opal's own directories.
@@ -107,7 +107,7 @@ bounded to it (and to sane connect, total and stall limits), so a stalled or
 oversized response can't hang the install or fill the cache. A checkout
 without a pin for its version refuses the download and says so. Choose explicitly with `install.sh --build` or
 `install.sh --prebuilt`. To check a download yourself:
-`gh attestation verify opal-v0.3.1-x86_64-linux.tar.gz --repo derekross/opal`.
+`gh attestation verify opal-v0.3.2-x86_64-linux.tar.gz --repo derekross/opal`.
 
 ## Update
 
@@ -201,10 +201,13 @@ anyone.
 
 **What it can't do.** Any program running as your user can open the socket,
 so the socket itself grants nothing: it takes a pairing you clicked through,
-and then only the declared kinds, under the rules you set. A program that is
-already running as you could copy the paired app's token and exec the real
-program, so the executable check is a second lock, not a wall; what protects
-the key is the prompt, the rules and the activity log.
+and then only the declared kinds, under the rules you set. Answering prompts,
+accepting apps and everything else the panel does need the UI session token
+(see [Security](#security)), so a program can't pair itself or approve its own
+requests. A program that is already running as you could copy the paired
+app's token and start the real program, so the unit check is a second lock,
+not a wall; what protects the key is the prompt, the rules and the activity
+log.
 
 The methods, over `$XDG_RUNTIME_DIR/opal.sock` (newline-delimited JSON, see
 `crates/opal-core/src/ipc.rs`):

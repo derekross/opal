@@ -114,6 +114,11 @@ pub struct App {
     pub bunker: Mutex<Option<Arc<BunkerSigner>>>,
     /// Why the status module isn't running, for the UI.
     pub status_blocked: Mutex<Option<String>>,
+    /// The UI session token: handed out when the passphrase is verified,
+    /// required for anything that grants authority or shows content. Any
+    /// process running as the user can reach the socket; only one that
+    /// knows the passphrase (or is the UI that asked for it) gets this.
+    ui_token: Mutex<Option<Zeroizing<String>>>,
     /// The running notifications module and what it was started with.
     pub notify: Mutex<Option<(NotifyEngine, String)>>,
 }
@@ -185,7 +190,41 @@ impl App {
             status: Mutex::new(None),
             bunker: Mutex::new(None),
             status_blocked: Mutex::new(None),
+            ui_token: Mutex::new(None),
         }))
+    }
+
+    /// The UI session token, minted on first use (per daemon lifetime).
+    pub async fn issue_ui_token(&self) -> Zeroizing<String> {
+        let mut t = self.ui_token.lock().await;
+        if t.is_none() {
+            *t = Some(Zeroizing::new(opal_signer::server::random_hex(32)));
+        }
+        t.clone().expect("just set")
+    }
+
+    /// Is `token` the UI session token? Compared in constant time.
+    pub async fn ui_token_ok(&self, token: &str) -> bool {
+        let t = self.ui_token.lock().await;
+        let Some(real) = t.as_deref() else {
+            return false;
+        };
+        real.len() == token.len()
+            && real
+                .bytes()
+                .zip(token.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    }
+
+    /// Do privileged socket methods need the token? Only once there is a
+    /// key, and so a passphrase, to protect.
+    pub async fn ui_required(&self) -> bool {
+        self.vault
+            .accounts()
+            .await
+            .map(|a| !a.is_empty())
+            .unwrap_or(true)
     }
 
     pub fn next_offer_seq(&self) -> u64 {

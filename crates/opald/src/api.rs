@@ -25,9 +25,55 @@ use crate::profiles;
 /// How long a local app's `app.connect` waits for the user.
 const LOCAL_PAIR_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// The error a privileged method gives without the UI session token. The
+/// shell and the CLI look for this text and ask for the passphrase.
+pub const NEEDS_UI: &str = "sign in with your Opal passphrase first";
+
+/// Methods any process running as the user may call: state the bar gem
+/// shows, proving the passphrase, handing a link to the UI, and the
+/// paired-app calls that carry their own token. Everything else grants
+/// authority or shows content and needs the UI session token, because the
+/// socket itself only says the caller is *some* program of yours.
+fn open_method(method: &str) -> bool {
+    matches!(
+        method,
+        "ping"
+            | "status"
+            | "unlock"
+            | "lock"
+            | "authenticate"
+            | "accounts.list"
+            | "nostrconnect.parse"
+            | "nostrconnect.offer"
+            | "app.connect"
+            | "app.sign"
+            | "app.nip44"
+            | "app.status"
+            | "kinds.label"
+            | "qr.svg"
+    )
+}
+
 /// Handle one request. `Err` becomes the response's `error` string.
 /// `peer` is the process on the other end of the socket.
 pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) -> Result<Value> {
+    // The UI session token rides along as `ui_token`. A valid one marks
+    // the connection, which then also gets the full event stream.
+    let mut params = params;
+    let presented = match &mut params {
+        Value::Object(m) => m
+            .remove("ui_token")
+            .and_then(|v| v.as_str().map(|s| Zeroizing::new(s.to_string()))),
+        _ => None,
+    };
+    if let Some(t) = &presented
+        && app.ui_token_ok(t).await
+    {
+        peer.session.set_privileged();
+    }
+    if !open_method(method) && !peer.session.is_privileged() && app.ui_required().await {
+        bail!("{NEEDS_UI}");
+    }
     match method {
         "ping" => Ok(json!("pong")),
         "status" => Ok(app.status().await),
@@ -37,8 +83,22 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             let p: Passphrase = parse(params)?;
             app.vault.unlock(&p.passphrase).await?;
             app.touch().await;
+            peer.session.set_privileged();
+            let token = app.issue_ui_token().await;
             app.emit_state().await;
-            Ok(json!({"locked": false}))
+            Ok(json!({"locked": false, "ui_token": token.as_str()}))
+        }
+        // Prove the passphrase without unlocking: the UI after a restart,
+        // the CLI before a privileged command.
+        "authenticate" => {
+            let p: Passphrase = parse(params)?;
+            app.vault
+                .verify_passphrase(&p.passphrase)
+                .await
+                .map_err(|e| anyhow!("{e}"))?;
+            peer.session.set_privileged();
+            let token = app.issue_ui_token().await;
+            Ok(json!({"ui_token": token.as_str()}))
         }
         "lock" => {
             app.lock("requested").await;
@@ -1275,7 +1335,16 @@ mod tests {
             pid: Some(4242),
             exe: Some(PathBuf::from(exe)),
             unit: Some("peridot.service".into()),
+            session: Default::default(),
         }
+    }
+
+    /// The shell after it showed the UI session token (any process may
+    /// reach the socket; only a signed-in connection may do these things).
+    fn ui() -> Peer {
+        let p = Peer::default();
+        p.session.set_privileged();
+        p
     }
 
     /// The usual case: a service whose executable the sandbox can't read.
@@ -1285,6 +1354,7 @@ mod tests {
             pid: Some(4242),
             exe: None,
             unit: Some(unit.into()),
+            session: Default::default(),
         }
     }
 
@@ -1298,9 +1368,7 @@ mod tests {
 
     async fn wait_for_offer(app: &Arc<App>) -> Value {
         for _ in 0..100 {
-            let offers = call(app, &Peer::default(), "app.offers", json!(null))
-                .await
-                .unwrap();
+            let offers = call(app, &ui(), "app.offers", json!(null)).await.unwrap();
             if let Some(o) = offers.as_array().and_then(|a| a.first()) {
                 return o.clone();
             }
@@ -1322,7 +1390,7 @@ mod tests {
         assert_eq!(offer["account_label"], json!("Me"));
         let accepted = call(
             app,
-            &Peer::default(),
+            &ui(),
             "app.accept",
             json!({"offer_id": offer["id"], "policy": policy, "grant": grant}),
         )
@@ -1373,22 +1441,15 @@ mod tests {
         assert_eq!(status["name"], json!("Peridot"));
         assert_eq!(status["policy"], json!("manual"));
 
-        let apps = call(&app, &Peer::default(), "apps.list", json!(null))
-            .await
-            .unwrap();
+        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
         assert_eq!(apps[0]["kind"], json!("local"));
         assert_eq!(apps[0]["exe"], json!(exe));
-        let get = call(
-            &app,
-            &Peer::default(),
-            "apps.get",
-            json!({"id": apps[0]["id"]}),
-        )
-        .await
-        .unwrap();
+        let get = call(&app, &ui(), "apps.get", json!({"id": apps[0]["id"]}))
+            .await
+            .unwrap();
         assert_eq!(get["rules"].as_array().unwrap().len(), 1);
 
-        let activity = call(&app, &Peer::default(), "activity.list", json!(null))
+        let activity = call(&app, &ui(), "activity.list", json!(null))
             .await
             .unwrap();
         assert_eq!(activity[0]["app_name"], json!("Peridot"));
@@ -1424,9 +1485,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
-        let err = sign(Peer::default(), token.clone(), 30078)
-            .await
-            .unwrap_err();
+        let err = sign(ui(), token.clone(), 30078).await.unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
         let err = sign(unit_peer("peridot.service"), token, 30078)
             .await
@@ -1446,7 +1505,7 @@ mod tests {
         assert_eq!(offer["unit"], json!("peridot.service"));
         call(
             &app,
-            &Peer::default(),
+            &ui(),
             "app.accept",
             json!({"offer_id": offer["id"], "policy": "basic", "grant": ["sign_event:30078"]}),
         )
@@ -1473,9 +1532,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("peridot.service"), "{err}");
-        let apps = call(&app, &Peer::default(), "apps.list", json!(null))
-            .await
-            .unwrap();
+        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
         assert_eq!(apps[0]["unit"], json!("peridot.service"));
     }
 
@@ -1495,22 +1552,15 @@ mod tests {
             err.to_string(),
             "that app is already waiting for your approval"
         );
-        let r = call(
-            &app,
-            &Peer::default(),
-            "app.reject",
-            json!({"id": offer["id"]}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(r["removed"], json!(true));
-        assert_eq!(connect.await.unwrap().unwrap_err().to_string(), "declined");
-        let offers = call(&app, &Peer::default(), "app.offers", json!(null))
+        let r = call(&app, &ui(), "app.reject", json!({"id": offer["id"]}))
             .await
             .unwrap();
+        assert_eq!(r["removed"], json!(true));
+        assert_eq!(connect.await.unwrap().unwrap_err().to_string(), "declined");
+        let offers = call(&app, &ui(), "app.offers", json!(null)).await.unwrap();
         assert!(offers.as_array().unwrap().is_empty());
         assert!(
-            call(&app, &Peer::default(), "apps.list", json!(null))
+            call(&app, &ui(), "apps.list", json!(null))
                 .await
                 .unwrap()
                 .as_array()
@@ -1552,17 +1602,10 @@ mod tests {
         let (app, _) = test_app().await;
         let exe = "/x/peridotd";
         let token = pair(&app, exe, "basic", vec![]).await;
-        let apps = call(&app, &Peer::default(), "apps.list", json!(null))
+        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
+        let r = call(&app, &ui(), "apps.remove", json!({"id": apps[0]["id"]}))
             .await
             .unwrap();
-        let r = call(
-            &app,
-            &Peer::default(),
-            "apps.remove",
-            json!({"id": apps[0]["id"]}),
-        )
-        .await
-        .unwrap();
         assert_eq!(r["removed"], json!(true));
         let err = call(&app, &peer(exe), "app.status", json!({"token": token}))
             .await
@@ -1586,7 +1629,7 @@ mod tests {
                         assert_eq!(prompt.request.kind, Some(24242));
                         call(
                             &app,
-                            &Peer::default(),
+                            &ui(),
                             "prompts.answer",
                             json!({"id": prompt.id, "allow": true}),
                         )
@@ -1608,7 +1651,7 @@ mod tests {
         .unwrap();
         assert!(signed["sig"].is_string());
         assert!(answerer.await.unwrap(), "a prompt was shown");
-        let activity = call(&app, &Peer::default(), "activity.list", json!(null))
+        let activity = call(&app, &ui(), "activity.list", json!(null))
             .await
             .unwrap();
         assert_eq!(activity[0]["source"], json!("user"));
@@ -1630,6 +1673,149 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.to_string(), "Opal is locked");
+    }
+
+    #[tokio::test]
+    async fn privileged_methods_need_the_ui_session() {
+        let (app, pk) = test_app().await;
+        let stranger = Peer::default();
+        for (m, p) in [
+            ("prompts.list", json!(null)),
+            ("prompts.answer", json!({"id": "x", "allow": true})),
+            ("nostrconnect.accept", json!({"uri": "nostrconnect://x"})),
+            ("app.accept", json!({"offer_id": "x"})),
+            (
+                "apps.set_rule",
+                json!({"id": "x", "method": "sign_event", "allow": true, "remember": "1h"}),
+            ),
+            ("apps.list", json!(null)),
+            ("activity.list", json!(null)),
+            ("config.set", json!({})),
+        ] {
+            let err = call(&app, &stranger, m, p).await.unwrap_err().to_string();
+            assert_eq!(err, NEEDS_UI, "{m}");
+        }
+        // A wrong or made-up token changes nothing.
+        let err = call(
+            &app,
+            &stranger,
+            "apps.list",
+            json!({"ui_token": "0".repeat(64)}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), NEEDS_UI);
+        assert!(!stranger.session.is_privileged());
+        // The wrong passphrase gives no token.
+        assert!(
+            call(
+                &app,
+                &stranger,
+                "authenticate",
+                json!({"passphrase": "nope"})
+            )
+            .await
+            .is_err()
+        );
+        // The right one does, and it works from any connection that shows it.
+        let token = call(&app, &stranger, "authenticate", json!({"passphrase": PW}))
+            .await
+            .unwrap()["ui_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(token.len(), 64);
+        assert!(
+            stranger.session.is_privileged(),
+            "proving the passphrase signs the connection in"
+        );
+        let other = Peer::default();
+        assert!(
+            call(&app, &other, "apps.list", json!({"ui_token": token}))
+                .await
+                .is_ok()
+        );
+        assert!(other.session.is_privileged());
+        // The open methods never needed it.
+        assert!(
+            call(&app, &Peer::default(), "status", json!(null))
+                .await
+                .is_ok()
+        );
+        assert!(
+            call(&app, &Peer::default(), "accounts.list", json!(null))
+                .await
+                .is_ok()
+        );
+        let _ = pk;
+    }
+
+    #[tokio::test]
+    async fn unlock_hands_the_ui_token_to_the_unlocking_connection() {
+        let (app, _) = test_app().await;
+        app.lock("test").await;
+        let shell = Peer::default();
+        let r = call(&app, &shell, "unlock", json!({"passphrase": PW}))
+            .await
+            .unwrap();
+        assert_eq!(r["locked"], json!(false));
+        assert_eq!(r["ui_token"].as_str().map(str::len), Some(64));
+        assert!(shell.session.is_privileged());
+        assert!(
+            call(&app, &shell, "prompts.list", json!(null))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_to_protect_yet_means_no_sign_in() {
+        let mut config = Config::default();
+        config.modules.signer = true;
+        config.signer.relays = vec![];
+        let app = App::new(Options {
+            config,
+            config_path: PathBuf::from("/nonexistent/opal.toml"),
+            db: Db::open_in_memory().unwrap(),
+            store: SecretStore::memory(),
+            vault_log_n: Some(4),
+        })
+        .await
+        .unwrap();
+        // First-run setup happens before any passphrase exists.
+        assert!(
+            call(&app, &Peer::default(), "apps.list", json!(null))
+                .await
+                .is_ok()
+        );
+        assert!(
+            call(&app, &Peer::default(), "config.get", json!(null))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn events_are_redacted_until_the_connection_signs_in() {
+        use opal_kit::ipc::Service;
+        let (app, _) = test_app().await;
+        let stranger = Peer::default();
+        let ev = |name: &str| opal_core::ipc::IpcEvent {
+            event: name.into(),
+            data: json!({"secret": 1}),
+        };
+        assert!(app.filter_event(&stranger, &ev("prompt")).is_none());
+        assert!(app.filter_event(&stranger, &ev("notify")).is_none());
+        assert!(
+            app.filter_event(&stranger, &ev("nostrconnect_offer"))
+                .is_none()
+        );
+        assert!(app.filter_event(&stranger, &ev("signer")).is_none());
+        assert!(app.filter_event(&stranger, &ev("state")).is_some());
+        assert!(app.filter_event(&stranger, &ev("pending")).is_some());
+        assert!(app.filter_event(&stranger, &ev("unread")).is_some());
+        stranger.session.set_privileged();
+        assert!(app.filter_event(&stranger, &ev("prompt")).is_some());
     }
 
     #[test]

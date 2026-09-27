@@ -37,4 +37,17 @@ impl opal_kit::ipc::Service for App {
     fn events(&self) -> broadcast::Receiver<IpcEvent> {
         self.events.subscribe()
     }
+
+    /// A connection that hasn't shown the UI session token gets the state
+    /// snapshot and counts (what the bar gem needs), nothing an app asked
+    /// to sign, no notification content, no offers.
+    fn filter_event(&self, peer: &Peer, event: &IpcEvent) -> Option<IpcEvent> {
+        if peer.session.is_privileged() {
+            return Some(event.clone());
+        }
+        match event.event.as_str() {
+            "state" | "pending" | "unread" => Some(event.clone()),
+            _ => None,
+        }
+    }
 }
