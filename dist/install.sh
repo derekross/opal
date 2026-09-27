@@ -38,13 +38,13 @@ die() { echo "$*" >&2; exit 1; }
 # checkout) is left alone and the install stops.
 our_binary() { [[ ! -e $1 ]] || grep -qa "$2" "$1"; }
 our_unit() { [[ ! -e $UNIT ]] || grep -q "https://github.com/derekross/opal" "$UNIT"; }
-# The link handler: our marker, or (installs from before the marker) a
-# launcher that opens links with `opal connect`.
+# The link handler is ours only if it is exactly what this script writes
+# (or wrote before the X-Opal-Source line was added). A launcher you edited
+# keeps our mark but isn't ours to replace any more.
+render_launcher() { sed "s|@BINDIR@|$BINDIR|g" dist/opal-nostrconnect.desktop; }
 our_launcher() {
-  [[ ! -e $LAUNCHER ]] && return 0
   [[ -f $LAUNCHER && ! -L $LAUNCHER ]] || return 1
-  grep -q "https://github.com/derekross/opal" "$LAUNCHER" && return 0
-  grep -q "^Name=Opal Nostr Connect$" "$LAUNCHER" && grep -q "^Exec=.*/opal connect %u$" "$LAUNCHER"
+  cmp -s "$LAUNCHER" <(render_launcher) || cmp -s "$LAUNCHER" <(render_launcher | grep -v '^X-Opal-Source=')
 }
 # A plugin folder this script copied: our marker, or (installs from before
 # the marker) a plain folder with Opal's manifest and service file.
@@ -120,7 +120,12 @@ our_binary "$BINDIR/opald" "Opal daemon" \
 our_binary "$BINDIR/opal" "Control the Opal Nostr signer" \
   || die "$BINDIR/opal exists and isn't Opal's. Move it aside, then run this again."
 our_unit || die "$UNIT exists and isn't Opal's. Move it aside, then run this again."
-our_launcher || die "$LAUNCHER exists and isn't Opal's. Move it aside, then run this again."
+INSTALL_LAUNCHER=1
+if [[ -e $LAUNCHER || -L $LAUNCHER ]] && ! our_launcher; then
+  INSTALL_LAUNCHER=0
+  echo "Note: $LAUNCHER isn't the one this script writes (edited, or not Opal's);"
+  echo "  leaving it and the nostrconnect:// handler as they are."
+fi
 INSTALL_PLUGIN=1
 if (( FROM_PLUGIN_CHECKOUT )); then
   INSTALL_PLUGIN=0
@@ -142,18 +147,20 @@ systemctl --user daemon-reload
 systemctl --user enable opal.service >/dev/null
 systemctl --user restart opal.service
 
-echo "nostrconnect:// link handler"
-mkdir -p "$APPDIR"
-# Only reached for a missing launcher or our own (checked above).
-sed "s|@BINDIR@|$BINDIR|g" dist/opal-nostrconnect.desktop >"$LAUNCHER"
-update-desktop-database "$APPDIR" 2>/dev/null || true
-current="$(xdg-mime query default x-scheme-handler/nostrconnect 2>/dev/null || true)"
-if [[ -z $current || $current == "opal-nostrconnect.desktop" ]]; then
-  xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect
-elif ask "  nostrconnect:// links currently open with $current. Open them with Opal instead?"; then
-  xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect
-else
-  echo "  Left $current as the handler (switch any time: xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect)"
+if (( INSTALL_LAUNCHER )); then
+  echo "nostrconnect:// link handler"
+  mkdir -p "$APPDIR"
+  # Only reached for a missing launcher or our own unchanged one (checked above).
+  render_launcher >"$LAUNCHER"
+  update-desktop-database "$APPDIR" 2>/dev/null || true
+  current="$(xdg-mime query default x-scheme-handler/nostrconnect 2>/dev/null || true)"
+  if [[ -z $current || $current == "opal-nostrconnect.desktop" ]]; then
+    xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect
+  elif ask "  nostrconnect:// links currently open with $current. Open them with Opal instead?"; then
+    xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect
+  else
+    echo "  Left $current as the handler (switch any time: xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect)"
+  fi
 fi
 
 # Earlier versions installed the plugin under the id "opal".

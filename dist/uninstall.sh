@@ -21,10 +21,12 @@ our_plugin_copy() {
   [[ ! -e $dir/.git && -f $dir/OpalService.qml ]] \
     && [[ "$(jq -r .id "$dir/manifest.json" 2>/dev/null)" == "$id" ]]
 }
+# The launcher is removed only if it is exactly what install.sh writes (now,
+# or before the X-Opal-Source line): an edited one is yours to keep.
+render_launcher() { sed "s|@BINDIR@|$HOME/.local/bin|g" dist/opal-nostrconnect.desktop; }
 our_launcher() {
   [[ -f $LAUNCHER && ! -L $LAUNCHER ]] || return 1
-  grep -q "https://github.com/derekross/opal" "$LAUNCHER" && return 0
-  grep -q "^Name=Opal Nostr Connect$" "$LAUNCHER" && grep -q "^Exec=.*/opal connect %u$" "$LAUNCHER"
+  cmp -s "$LAUNCHER" <(render_launcher) || cmp -s "$LAUNCHER" <(render_launcher | grep -v '^X-Opal-Source=')
 }
 PURGE=0
 [[ "${1:-}" == "--purge" ]] && PURGE=1
@@ -61,8 +63,8 @@ if our_launcher; then
   fi
   rm -f "$LAUNCHER"
   update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-elif [[ -e $LAUNCHER ]]; then
-  echo "  $LAUNCHER isn't Opal's; leaving it alone."
+elif [[ -e $LAUNCHER || -L $LAUNCHER ]]; then
+  echo "  $LAUNCHER isn't the one install.sh wrote (edited, or not Opal's); leaving it alone."
 fi
 
 echo "Removing the shell plugin"
