@@ -10,6 +10,7 @@ cd "$(dirname "$0")/.."
 PLUGIN_ID="$(jq -r .id manifest.json 2>/dev/null || echo derekross.opal)"
 PLUGINDIR="$HOME/.config/omarchy/plugins"
 UNIT="$HOME/.config/systemd/user/opal.service"
+LAUNCHER="$HOME/.local/share/applications/opal-nostrconnect.desktop"
 MARKER=".installed-by-opal"
 
 # Only what Opal installed is removed (see install.sh).
@@ -19,6 +20,11 @@ our_plugin_copy() {
   [[ -f $dir/$MARKER ]] && return 0
   [[ ! -e $dir/.git && -f $dir/OpalService.qml ]] \
     && [[ "$(jq -r .id "$dir/manifest.json" 2>/dev/null)" == "$id" ]]
+}
+our_launcher() {
+  [[ -f $LAUNCHER && ! -L $LAUNCHER ]] || return 1
+  grep -q "https://github.com/derekross/opal" "$LAUNCHER" && return 0
+  grep -q "^Name=Opal Nostr Connect$" "$LAUNCHER" && grep -q "^Exec=.*/opal connect %u$" "$LAUNCHER"
 }
 PURGE=0
 [[ "${1:-}" == "--purge" ]] && PURGE=1
@@ -48,12 +54,16 @@ for bin in "opald:Opal daemon" "opal:Control the Opal Nostr signer"; do
     echo "  $path isn't Opal's; leaving it alone."
   fi
 done
-if [[ "$(xdg-mime query default x-scheme-handler/nostrconnect 2>/dev/null)" == "opal-nostrconnect.desktop" ]]; then
-  # Leave no dangling default behind.
-  sed -i '/x-scheme-handler\/nostrconnect=opal-nostrconnect.desktop/d' "$HOME/.config/mimeapps.list" 2>/dev/null || true
+if our_launcher; then
+  if [[ "$(xdg-mime query default x-scheme-handler/nostrconnect 2>/dev/null)" == "opal-nostrconnect.desktop" ]]; then
+    # Leave no dangling default behind.
+    sed -i '/x-scheme-handler\/nostrconnect=opal-nostrconnect.desktop/d' "$HOME/.config/mimeapps.list" 2>/dev/null || true
+  fi
+  rm -f "$LAUNCHER"
+  update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+elif [[ -e $LAUNCHER ]]; then
+  echo "  $LAUNCHER isn't Opal's; leaving it alone."
 fi
-rm -f "$HOME/.local/share/applications/opal-nostrconnect.desktop"
-update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 echo "Removing the shell plugin"
 if command -v omarchy >/dev/null; then

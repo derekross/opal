@@ -7,3 +7,4 @@ Icon=dialog-password
 NoDisplay=true
 Terminal=false
 MimeType=x-scheme-handler/nostrconnect;
+X-Opal-Source=https://github.com/derekross/opal

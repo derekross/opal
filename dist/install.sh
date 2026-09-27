@@ -29,6 +29,7 @@ PLUGIN_PATH="$PLUGINDIR/$PLUGIN_ID"
 
 MARKER=".installed-by-opal"
 UNIT="$UNITDIR/opal.service"
+LAUNCHER="$APPDIR/opal-nostrconnect.desktop"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -37,6 +38,14 @@ die() { echo "$*" >&2; exit 1; }
 # checkout) is left alone and the install stops.
 our_binary() { [[ ! -e $1 ]] || grep -qa "$2" "$1"; }
 our_unit() { [[ ! -e $UNIT ]] || grep -q "https://github.com/derekross/opal" "$UNIT"; }
+# The link handler: our marker, or (installs from before the marker) a
+# launcher that opens links with `opal connect`.
+our_launcher() {
+  [[ ! -e $LAUNCHER ]] && return 0
+  [[ -f $LAUNCHER && ! -L $LAUNCHER ]] || return 1
+  grep -q "https://github.com/derekross/opal" "$LAUNCHER" && return 0
+  grep -q "^Name=Opal Nostr Connect$" "$LAUNCHER" && grep -q "^Exec=.*/opal connect %u$" "$LAUNCHER"
+}
 # A plugin folder this script copied: our marker, or (installs from before
 # the marker) a plain folder with Opal's manifest and service file.
 our_plugin_copy() {
@@ -111,6 +120,7 @@ our_binary "$BINDIR/opald" "Opal daemon" \
 our_binary "$BINDIR/opal" "Control the Opal Nostr signer" \
   || die "$BINDIR/opal exists and isn't Opal's. Move it aside, then run this again."
 our_unit || die "$UNIT exists and isn't Opal's. Move it aside, then run this again."
+our_launcher || die "$LAUNCHER exists and isn't Opal's. Move it aside, then run this again."
 INSTALL_PLUGIN=1
 if (( FROM_PLUGIN_CHECKOUT )); then
   INSTALL_PLUGIN=0
@@ -134,7 +144,8 @@ systemctl --user restart opal.service
 
 echo "nostrconnect:// link handler"
 mkdir -p "$APPDIR"
-sed "s|@BINDIR@|$BINDIR|g" dist/opal-nostrconnect.desktop >"$APPDIR/opal-nostrconnect.desktop"
+# Only reached for a missing launcher or our own (checked above).
+sed "s|@BINDIR@|$BINDIR|g" dist/opal-nostrconnect.desktop >"$LAUNCHER"
 update-desktop-database "$APPDIR" 2>/dev/null || true
 current="$(xdg-mime query default x-scheme-handler/nostrconnect 2>/dev/null || true)"
 if [[ -z $current || $current == "opal-nostrconnect.desktop" ]]; then
