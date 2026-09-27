@@ -66,38 +66,64 @@ recorded_hash() { plugin_hashes "$1" | awk -v f="$2" '$2 == f { print $1 }'; }
 file_hash() { sha256sum "$1" | cut -d' ' -f1; }
 
 # Carry what's yours in `old` over into `staging` (the new copy), so the
-# swap below loses nothing: Opal's unchanged files are the ones replaced.
+# swap below loses nothing: Opal's unchanged files are the only entries
+# not carried over. Every entry counts: Opal ships regular files only, so a
+# folder (empty or not), a symlink or anything else is yours.
 merge_plugin_copy() {
   local old=$1 staging=$2 legacy=0 rel recorded
   [[ -n "$(plugin_hashes "$old")" ]] || legacy=1
   while IFS= read -r -d '' rel; do
     [[ $rel == "$MARKER" ]] && continue
-    recorded="$(recorded_hash "$old" "$rel")"
-    if [[ -n $recorded ]]; then
-      [[ "$(file_hash "$old/$rel")" == "$recorded" ]] && continue   # Opal's, unchanged
-      echo "  keeping $rel: you changed it (Opal's version isn't installed)"
-      # Yours now: drop it from the list of Opal's files.
-      sed -i "\|  ${rel//|/\\|}\$|d" "$staging/$MARKER"
-    elif (( legacy )) && [[ -f $staging/$rel ]]; then
-      continue   # a file Opal ships, from before the hash lines
+    if [[ -d $old/$rel && ! -L $old/$rel ]]; then
+      mkdir -p "$staging/$rel"
+      continue
+    fi
+    if [[ -f $old/$rel && ! -L $old/$rel ]]; then
+      recorded="$(recorded_hash "$old" "$rel")"
+      if [[ -n $recorded ]]; then
+        [[ "$(file_hash "$old/$rel")" == "$recorded" ]] && continue   # Opal's, unchanged
+        echo "  keeping $rel: you changed it (Opal's version isn't installed)"
+      elif (( legacy )) && [[ -f $staging/$rel ]]; then
+        continue   # a file Opal ships, from before the hash lines
+      else
+        echo "  keeping $rel: not Opal's"
+      fi
     else
       echo "  keeping $rel: not Opal's"
     fi
+    # Yours now, whatever Opal ships under that name: drop it from the list
+    # of Opal's files and put yours in its place.
+    sed -i "\|  ${rel//|/\\|}\$|d" "$staging/$MARKER"
     mkdir -p "$staging/$(dirname "$rel")"
-    cp -p "$old/$rel" "$staging/$rel"
-  done < <(cd "$old" && find . -type f -printf '%P\0')
+    rm -rf "${staging:?}/$rel"
+    cp -a "$old/$rel" "$staging/$rel"
+  done < <(cd "$old" && find . -mindepth 1 -printf '%P\0')
 }
 
-# Remove the files Opal put in `dir` and still match; keep the rest.
+# Remove the files Opal put in `dir` and still match, and the folders they
+# were in once empty; keep the rest (your files, folders, links).
 remove_plugin_copy() {
   local dir=$1 rel recorded
   while IFS= read -r -d '' rel; do
+    [[ -f $dir/$rel && ! -L $dir/$rel ]] || continue
     recorded="$(recorded_hash "$dir" "$rel")"
-    [[ -n $recorded && "$(file_hash "$dir/$rel")" == "$recorded" ]] && rm -f "$dir/$rel"
-  done < <(cd "$dir" && find . -type f ! -name "$MARKER" -printf '%P\0')
+    [[ -n $recorded && "$(file_hash "$dir/$rel")" == "$recorded" ]] || continue
+    rm -f "$dir/$rel"
+    prune_plugin_dirs "$dir" "$rel"
+  done < <(cd "$dir" && find . -mindepth 1 ! -name "$MARKER" -printf '%P\0')
   rm -f "$dir/$MARKER"
-  find "$dir" -depth -type d -empty -delete
-  [[ ! -e $dir ]] || echo "  kept $dir: it holds files that aren't Opal's (or were changed)"
+  rmdir "$dir" 2>/dev/null || echo "  kept $dir: it holds entries that aren't Opal's (or were changed)"
+}
+
+# After removing Opal's file `rel`, remove the folders it was in if they are
+# empty now; a folder you made stays even when empty.
+prune_plugin_dirs() {
+  local dir=$1 rel=$2
+  rel="$(dirname "$rel")"
+  while [[ $rel != "." ]]; do
+    rmdir "$dir/$rel" 2>/dev/null || break
+    rel="$(dirname "$rel")"
+  done
 }
 
 ask() {

@@ -42,21 +42,37 @@ shipped_file() {
   fi
 }
 
-# Remove the files Opal put in `dir` and still match; keep the rest.
+# Remove the files Opal put in `dir` and still match, and the folders they
+# were in once empty; keep the rest (your files, folders, links).
 remove_plugin_copy() {
-  local dir=$1 legacy=0 rel recorded
+  local dir=$1 legacy=0 rel recorded ours
   [[ -n "$(plugin_hashes "$dir")" ]] || legacy=1
   while IFS= read -r -d '' rel; do
+    [[ -f $dir/$rel && ! -L $dir/$rel ]] || continue
     recorded="$(recorded_hash "$dir" "$rel")"
+    ours=0
     if [[ -n $recorded ]]; then
-      [[ "$(file_hash "$dir/$rel")" == "$recorded" ]] && rm -f "$dir/$rel"
+      [[ "$(file_hash "$dir/$rel")" == "$recorded" ]] && ours=1
     elif (( legacy )) && cmp -s "$dir/$rel" <(shipped_file "$rel"); then
-      rm -f "$dir/$rel"
+      ours=1
     fi
-  done < <(cd "$dir" && find . -type f ! -name "$MARKER" -printf '%P\0')
+    (( ours )) || continue
+    rm -f "$dir/$rel"
+    prune_plugin_dirs "$dir" "$rel"
+  done < <(cd "$dir" && find . -mindepth 1 ! -name "$MARKER" -printf '%P\0')
   rm -f "$dir/$MARKER"
-  find "$dir" -depth -type d -empty -delete
-  [[ ! -e $dir ]] || echo "  kept $dir: it holds files that aren't Opal's (or were changed)"
+  rmdir "$dir" 2>/dev/null || echo "  kept $dir: it holds entries that aren't Opal's (or were changed)"
+}
+
+# After removing Opal's file `rel`, remove the folders it was in if they are
+# empty now; a folder you made stays even when empty.
+prune_plugin_dirs() {
+  local dir=$1 rel=$2
+  rel="$(dirname "$rel")"
+  while [[ $rel != "." ]]; do
+    rmdir "$dir/$rel" 2>/dev/null || break
+    rel="$(dirname "$rel")"
+  done
 }
 # The launcher is removed only if it is exactly what install.sh writes (now,
 # or before the X-Opal-Source line): an edited one is yours to keep.
