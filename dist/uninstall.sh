@@ -4,144 +4,153 @@
 #
 #   ./dist/uninstall.sh           remove the program, keep keys and data
 #   ./dist/uninstall.sh --purge   also delete keys, settings and history
+#
+# Only what Opal can prove it wrote is removed (the rule is in dist/lib.sh):
+# a unit, launcher or plugin file you changed stays and is named, a masked
+# or linked unit is left alone, folders keep anything you added, and
+# backups Opal made are never deleted, not even with --purge.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-PLUGIN_ID="$(jq -r .id manifest.json 2>/dev/null || echo derekross.opal)"
-PLUGINDIR="$HOME/.config/omarchy/plugins"
-UNIT="$HOME/.config/systemd/user/opal.service"
-LAUNCHER="$HOME/.local/share/applications/opal-nostrconnect.desktop"
-MARKER=".installed-by-opal"
+source dist/lib.sh || { echo "dist/lib.sh is missing: run this from an Opal checkout" >&2; exit 1; }
 
-# Only what Opal installed is removed (see install.sh).
-our_plugin_copy() {
-  local dir=$1 id=$2
-  [[ -d $dir && ! -L $dir ]] || return 1
-  [[ -f $dir/$MARKER ]] && return 0
-  [[ ! -e $dir/.git && -f $dir/OpalService.qml ]] \
-    && [[ "$(jq -r .id "$dir/manifest.json" 2>/dev/null)" == "$id" ]]
-}
-# The plugin copy. The marker's first line is Opal's URL; the lines after it
-# are `sha256sum` lines for every file this script put there. A file is
-# Opal's to replace or remove only while it still matches its line; a file
-# that was edited, or added, is yours and stays. Copies from before the
-# hash lines (a marker with the URL only, or none) can't be checked file by
-# file: the files Opal ships are replaced, anything else is kept.
-plugin_hashes() { [[ -f $1/$MARKER ]] || return 0; sed -n '2,$p' "$1/$MARKER"; }
-recorded_hash() { plugin_hashes "$1" | awk -v f="$2" '$2 == f { print $1 }'; }
-file_hash() { sha256sum "$1" | cut -d' ' -f1; }
-
-# What this checkout would have installed as `rel`, for copies from before
-# the hash lines: only a file identical to it is removed.
-shipped_file() {
-  local rel=$1
-  if [[ $rel == manifest.json ]]; then
-    jq '.entryPoints |= with_entries(.value |= ltrimstr("shell-plugin/"))' manifest.json 2>/dev/null
-  elif [[ -f shell-plugin/$rel ]]; then
-    cat "shell-plugin/$rel"
-  fi
-}
-
-# Remove the files Opal put in `dir` and still match, and the folders they
-# were in once empty; keep the rest (your files, folders, links).
-remove_plugin_copy() {
-  local dir=$1 legacy=0 rel recorded ours
-  [[ -n "$(plugin_hashes "$dir")" ]] || legacy=1
-  while IFS= read -r -d '' rel; do
-    [[ -f $dir/$rel && ! -L $dir/$rel ]] || continue
-    recorded="$(recorded_hash "$dir" "$rel")"
-    ours=0
-    if [[ -n $recorded ]]; then
-      [[ "$(file_hash "$dir/$rel")" == "$recorded" ]] && ours=1
-    elif (( legacy )) && cmp -s "$dir/$rel" <(shipped_file "$rel"); then
-      ours=1
-    fi
-    (( ours )) || continue
-    rm -f "$dir/$rel"
-    prune_plugin_dirs "$dir" "$rel"
-  done < <(cd "$dir" && find . -mindepth 1 ! -name "$MARKER" -printf '%P\0')
-  rm -f "$dir/$MARKER"
-  rmdir "$dir" 2>/dev/null || echo "  kept $dir: it holds entries that aren't Opal's (or were changed)"
-}
-
-# After removing Opal's file `rel`, remove the folders it was in if they are
-# empty now; a folder you made stays even when empty.
-prune_plugin_dirs() {
-  local dir=$1 rel=$2
-  rel="$(dirname "$rel")"
-  while [[ $rel != "." ]]; do
-    rmdir "$dir/$rel" 2>/dev/null || break
-    rel="$(dirname "$rel")"
-  done
-}
-# The launcher is removed only if it is exactly what install.sh writes (now,
-# or before the X-Opal-Source line): an edited one is yours to keep.
-render_launcher() { sed "s|@BINDIR@|$HOME/.local/bin|g" dist/opal-nostrconnect.desktop; }
-our_launcher() {
-  [[ -f $LAUNCHER && ! -L $LAUNCHER ]] || return 1
-  cmp -s "$LAUNCHER" <(render_launcher) || cmp -s "$LAUNCHER" <(render_launcher | grep -v '^X-Opal-Source=')
-}
 PURGE=0
-[[ "${1:-}" == "--purge" ]] && PURGE=1
+for arg in "$@"; do
+  case $arg in
+    --purge) PURGE=1 ;;
+    -h | --help) sed -n '2,11p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $arg (only --purge)" >&2; exit 2 ;;
+  esac
+done
 
 if (( PURGE )); then
-  echo "This deletes every Opal key from the keyring, plus settings and history."
-  echo "Make sure you have a backup of your keys (ncryptsec) first."
-  read -r -p "Type 'delete my keys' to continue: " reply
-  [[ $reply == "delete my keys" ]] || { echo "Cancelled."; exit 1; }
+  [[ -t 0 ]] || die "--purge needs a terminal to confirm on."
+  say "This deletes every Opal key from the keyring, plus settings and history:"
+  note "$DATADIR, $CONFIGDIR, $CACHEDIR"
+  say "Make sure you have a backup of your keys (ncryptsec) first."
+  read -r -p "Type 'delete my keys' to continue: " reply </dev/tty
+  [[ $reply == "delete my keys" ]] || { say "Cancelled."; exit 1; }
 fi
 
-echo "Stopping the service"
-if [[ -e $UNIT ]] && ! grep -q "https://github.com/derekross/opal" "$UNIT"; then
-  echo "  $UNIT isn't Opal's; leaving it alone."
-else
-  systemctl --user disable --now opal.service >/dev/null 2>&1 || true
-  rm -f "$UNIT"
-  systemctl --user daemon-reload
-fi
+prepare_state
+load_manifest
+load_known
+print_paths
 
-echo "Removing binaries and the link handler"
-for bin in "opald:Opal daemon" "opal:Control the Opal Nostr signer"; do
-  path="$HOME/.local/bin/${bin%%:*}"
-  if [[ -e $path ]] && grep -qa "${bin#*:}" "$path"; then
-    rm -f "$path"
-  elif [[ -e $path ]]; then
-    echo "  $path isn't Opal's; leaving it alone."
-  fi
+# Only paths this script would write itself are taken from the record;
+# a record that was edited or restored from elsewhere can't point it at
+# anything else.
+for p in "${!MANIFEST_HASH[@]}"; do
+  case $p in
+    "$BINDIR/opald" | "$BINDIR/opal" | "$UNIT" | "$LAUNCHER" | "$PLUGIN_PATH"/* | "$OLD_PLUGIN_PATH"/*) ;;
+    *) note "ignoring a record line for $p: not a path this script writes"; unset 'MANIFEST_HASH[$p]' ;;
+  esac
 done
-if our_launcher; then
-  if [[ "$(xdg-mime query default x-scheme-handler/nostrconnect 2>/dev/null)" == "opal-nostrconnect.desktop" ]]; then
-    # Leave no dangling default behind.
-    sed -i '/x-scheme-handler\/nostrconnect=opal-nostrconnect.desktop/d' "$HOME/.config/mimeapps.list" 2>/dev/null || true
-  fi
-  rm -f "$LAUNCHER"
-  update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-elif [[ -e $LAUNCHER || -L $LAUNCHER ]]; then
-  echo "  $LAUNCHER isn't the one install.sh wrote (edited, or not Opal's); leaving it alone."
-fi
 
-echo "Removing the shell plugin"
-if command -v omarchy >/dev/null; then
-  omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1 || true
-fi
-for dir in "$PLUGINDIR/$PLUGIN_ID:$PLUGIN_ID" "$PLUGINDIR/opal:opal"; do
-  path="${dir%%:*}"
-  if our_plugin_copy "$path" "${dir#*:}"; then
-    remove_plugin_copy "$path"
-  elif [[ -e $path && $path == "$PLUGINDIR/$PLUGIN_ID" ]]; then
-    # e.g. added with `omarchy plugin add`: that command removes it.
-    echo "  $path wasn't installed by install.sh; remove it with: omarchy plugin remove $PLUGIN_ID"
-  fi
+# ── The service ────────────────────────────────────────────────────────
+inspect_unit
+say "Stopping the service"
+case $UNIT_STATE in
+  owned)
+    if [[ -z $UNIT_FRAGMENT || $UNIT_FRAGMENT == "$UNIT" ]]; then
+      systemctl_user disable --now opal.service
+    else
+      systemctl_user stop opal.service
+    fi
+    remove_owned "$UNIT" "$(file_hash "$UNIT")"
+    systemctl_user daemon-reload ;;
+  edited)
+    systemctl_user stop opal.service
+    note "$UNIT is kept: you changed it. It starts the binary this removes, so it is stopped but not disabled;"
+    note "when you're done with it: systemctl --user disable opal.service && rm $UNIT" ;;
+  elsewhere)
+    if unit_runs_our_binary; then systemctl_user stop opal.service; note "opal.service comes from $UNIT_FRAGMENT (not Opal's); stopped because it starts the binary this removes, otherwise left alone."
+    else note "opal.service comes from $UNIT_FRAGMENT; not Opal's, leaving it alone."; fi ;;
+  symlink)
+    note "$UNIT is a symbolic link (masked or linked); not Opal's, leaving it alone."
+    if [[ -f $UNIT ]] && grep -qF -- "$BINDIR/opald" "$UNIT" 2>/dev/null; then note "it still starts Opal's binary, which this removes: disable or fix it yourself."; fi ;;
+  foreign) note "$UNIT isn't Opal's; leaving it alone." ;;
+  other) note "$UNIT isn't a regular file; leaving it alone." ;;
+  missing) ;;
+esac
+(( UNIT_DROPIN )) && note "$UNIT.d/ drop-ins are yours; not touched."
+
+# ── Binaries ───────────────────────────────────────────────────────────
+say "Removing binaries"
+for bin in opald opal; do
+  p="$BINDIR/$bin"
+  case "$(binary_state "$p")" in
+    owned) remove_owned "$p" "$(file_hash "$p")" ;;
+    unrecorded) note "$p isn't recorded as installed by Opal ($(describe_file "$p")); leaving it." ;;
+    symlink) note "$p is a link; not Opal's, leaving it." ;;
+    other) note "$p isn't a regular file; leaving it." ;;
+  esac
 done
-omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+
+# ── The link handler ───────────────────────────────────────────────────
+say "Removing the nostrconnect:// link handler"
+inspect_launcher
+case $LAUNCHER_STATE in
+  owned)
+    remove_owned "$LAUNCHER" "$(file_hash "$LAUNCHER")"
+    mimeapps_remove_opal
+    update-desktop-database "$APPDIR" >/dev/null 2>&1 || true ;;
+  foreign) note "$LAUNCHER isn't the one install.sh wrote (you changed it, or it's another program's); leaving it and its handler entry." ;;
+  other) note "$LAUNCHER is a link or not a file; not Opal's, leaving it." ;;
+esac
+
+# ── The shell plugin ───────────────────────────────────────────────────
+say "Removing the shell plugin"
+load_shipped
+for entry in "$PLUGIN_PATH:$PLUGIN_ID" "$OLD_PLUGIN_PATH:opal"; do
+  dir=${entry%%:*}; id=${entry#*:}
+  [[ $id == opal && $PLUGIN_ID == opal ]] && continue
+  case "$(plugin_dir_state "$dir")" in
+    missing) ;;
+    checkout) note "$dir is a checkout (has .git); remove it with: omarchy plugin remove $id" ;;
+    symlink) note "$dir is a link; not Opal's, leaving it." ;;
+    other) note "$dir isn't a folder; not Opal's, leaving it." ;;
+    dir)
+      if remove_plugin_copy "$dir"; then
+        command -v omarchy >/dev/null && { omarchy plugin disable "$id" >/dev/null 2>&1 || true; }
+      else
+        note "the shell may still list it; disable it with: omarchy plugin disable $id"
+      fi ;;
+  esac
+done
+command -v omarchy-shell >/dev/null && { omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true; }
+
+# ── The record, and --purge ────────────────────────────────────────────
+# Drop record lines for files that are gone (kept files keep their lines
+# only while they still match, which they don't if you changed them).
+for p in "${!MANIFEST_HASH[@]}"; do
+  [[ -f $p && ! -L $p && "$(file_hash "$p")" == "${MANIFEST_HASH[$p]}" ]] || unset 'MANIFEST_HASH[$p]'
+done
+write_manifest
 
 if (( PURGE )); then
-  echo "Deleting keys, settings and history"
-  secret-tool clear application opal 2>/dev/null || true
-  rm -rf "$HOME/.local/share/opal" "$HOME/.config/opal" "$HOME/.cache/opal"
+  say "Deleting keys, settings and history"
+  # Only Opal's own item kinds, never everything tagged application=opal.
+  before="$(secret-tool search --all application opal 2>/dev/null | grep -c '^\[' || true)"
+  for kind in account conn-key client-key; do
+    secret-tool clear application opal kind "$kind" 2>/dev/null || note "keyring: clearing '$kind' items failed; they may still be there."
+  done
+  after="$(secret-tool search --all application opal 2>/dev/null | grep -c '^\[' || true)"
+  note "keyring: ${before:-?} Opal item(s) before, ${after:-?} left$( (( ${after:-0} > 0 )) && printf ' (not Opal'\''s kinds, or clearing failed: check with Seahorse)')"
+  for d in "$DATADIR" "$CONFIGDIR" "$CACHEDIR"; do
+    if [[ -L $d ]]; then note "$d is a link; not followed, not removed."
+    elif [[ -d $d ]]; then rm -rf -- "$d"; note "removed $d"
+    else note "$d: nothing there"; fi
+  done
+  rm -f -- "$MANIFEST" "$STATEDIR/.lock"
+  rmdir -- "$STATEDIR" 2>/dev/null || true
 else
-  echo
-  echo "Kept: your keys (keyring, encrypted), ~/.local/share/opal, ~/.config/opal."
-  echo "Run with --purge to delete those too."
+  say
+  say "Kept: your keys (keyring, encrypted), $DATADIR, $CONFIGDIR."
+  say "Run with --purge to delete those too."
 fi
-echo "Opal removed."
+if [[ -d $BACKUPDIR ]] && [[ -n "$(ls -A -- "$BACKUPDIR" 2>/dev/null)" ]]; then
+  say "Backups Opal made are in $BACKUPDIR (Opal never deletes them):"
+  for f in "$BACKUPDIR"/*; do note "$f"; done
+fi
+say "Opal removed."

@@ -8,165 +8,72 @@
 #   ./dist/install.sh --build     always build from source
 #   ./dist/install.sh --prebuilt  always download the release binaries
 #   ./dist/install.sh --no-build  install already-built binaries
+#   --replace-existing=<path>     consent, for a non-interactive run, to
+#                                 replace that one file in ~/.local/bin that
+#                                 Opal has no record of (it is kept as a
+#                                 backup); repeat for the other
 #
 # Release binaries are built by GitHub Actions from the tag matching this
 # checkout's version, and checked against the release's SHA256SUMS (and its
 # build attestation too, when the GitHub CLI is signed in).
 #
 # Run it again after `git pull` / `omarchy plugin update` to update.
+#
+# What it touches, and when (the rule is in dist/lib.sh): a file is replaced
+# only while it is exactly what an Opal version wrote; a file you changed
+# stays and is named; a folder or link is never Opal's. Everything is
+# checked before anything is written. The service is enabled only on first
+# install; later runs restart it only if it is running Opal's binary.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO="$PWD"
-BINDIR="$HOME/.local/bin"
-UNITDIR="$HOME/.config/systemd/user"
-APPDIR="$HOME/.local/share/applications"
-PLUGINDIR="$HOME/.config/omarchy/plugins"
-PLUGIN_ID="$(jq -r .id manifest.json)"
+source dist/lib.sh || { echo "dist/lib.sh is missing: run this from an Opal checkout" >&2; exit 1; }
 VERSION="$(jq -r .version manifest.json)"
 GITHUB_REPO="derekross/opal"
-PLUGIN_PATH="$PLUGINDIR/$PLUGIN_ID"
 
-MARKER=".installed-by-opal"
-UNIT="$UNITDIR/opal.service"
-LAUNCHER="$APPDIR/opal-nostrconnect.desktop"
-
-die() { echo "$*" >&2; exit 1; }
-
-# Opal only replaces what it installed itself. Anything else at these paths
-# (another program's `opal` command, your own opal.service, a plugin
-# checkout) is left alone and the install stops.
-our_binary() { [[ ! -e $1 ]] || grep -qa "$2" "$1"; }
-our_unit() { [[ ! -e $UNIT ]] || grep -q "https://github.com/derekross/opal" "$UNIT"; }
-# The link handler is ours only if it is exactly what this script writes
-# (or wrote before the X-Opal-Source line was added). A launcher you edited
-# keeps our mark but isn't ours to replace any more.
-render_launcher() { sed "s|@BINDIR@|$BINDIR|g" dist/opal-nostrconnect.desktop; }
-our_launcher() {
-  [[ -f $LAUNCHER && ! -L $LAUNCHER ]] || return 1
-  cmp -s "$LAUNCHER" <(render_launcher) || cmp -s "$LAUNCHER" <(render_launcher | grep -v '^X-Opal-Source=')
-}
-# A plugin folder this script copied: our marker, or (installs from before
-# the marker) a plain folder with Opal's manifest and service file.
-our_plugin_copy() {
-  local dir=$1 id=$2
-  [[ -d $dir && ! -L $dir ]] || return 1
-  [[ -f $dir/$MARKER ]] && return 0
-  [[ ! -e $dir/.git && -f $dir/OpalService.qml ]] \
-    && [[ "$(jq -r .id "$dir/manifest.json" 2>/dev/null)" == "$id" ]]
-}
-# The plugin copy. The marker's first line is Opal's URL; the lines after it
-# are `sha256sum` lines for every file this script put there. A file is
-# Opal's to replace or remove only while it still matches its line; a file
-# that was edited, or added, is yours and stays. Copies from before the
-# hash lines (a marker with the URL only, or none) can't be checked file by
-# file: the files Opal ships are replaced, anything else is kept.
-plugin_hashes() { [[ -f $1/$MARKER ]] || return 0; sed -n '2,$p' "$1/$MARKER"; }
-recorded_hash() { plugin_hashes "$1" | awk -v f="$2" '$2 == f { print $1 }'; }
-file_hash() { sha256sum "$1" | cut -d' ' -f1; }
-
-# Carry what's yours in `old` over into `staging` (the new copy), so the
-# swap below loses nothing: Opal's unchanged files are the only entries
-# not carried over. Every entry counts: Opal ships regular files only, so a
-# folder (empty or not), a symlink or anything else is yours.
-merge_plugin_copy() {
-  local old=$1 staging=$2 legacy=0 rel recorded
-  [[ -n "$(plugin_hashes "$old")" ]] || legacy=1
-  while IFS= read -r -d '' rel; do
-    [[ $rel == "$MARKER" ]] && continue
-    if [[ -d $old/$rel && ! -L $old/$rel ]]; then
-      mkdir -p "$staging/$rel"
-      continue
-    fi
-    if [[ -f $old/$rel && ! -L $old/$rel ]]; then
-      recorded="$(recorded_hash "$old" "$rel")"
-      if [[ -n $recorded ]]; then
-        [[ "$(file_hash "$old/$rel")" == "$recorded" ]] && continue   # Opal's, unchanged
-        echo "  keeping $rel: you changed it (Opal's version isn't installed)"
-      elif (( legacy )) && [[ -f $staging/$rel ]]; then
-        continue   # a file Opal ships, from before the hash lines
-      else
-        echo "  keeping $rel: not Opal's"
-      fi
-    else
-      echo "  keeping $rel: not Opal's"
-    fi
-    # Yours now, whatever Opal ships under that name: drop it from the list
-    # of Opal's files and put yours in its place.
-    sed -i "\|  ${rel//|/\\|}\$|d" "$staging/$MARKER"
-    mkdir -p "$staging/$(dirname "$rel")"
-    rm -rf "${staging:?}/$rel"
-    cp -a "$old/$rel" "$staging/$rel"
-  done < <(cd "$old" && find . -mindepth 1 -printf '%P\0')
-}
-
-# Remove the files Opal put in `dir` and still match, and the folders they
-# were in once empty; keep the rest (your files, folders, links).
-remove_plugin_copy() {
-  local dir=$1 rel recorded
-  while IFS= read -r -d '' rel; do
-    [[ -f $dir/$rel && ! -L $dir/$rel ]] || continue
-    recorded="$(recorded_hash "$dir" "$rel")"
-    [[ -n $recorded && "$(file_hash "$dir/$rel")" == "$recorded" ]] || continue
-    rm -f "$dir/$rel"
-    prune_plugin_dirs "$dir" "$rel"
-  done < <(cd "$dir" && find . -mindepth 1 ! -name "$MARKER" -printf '%P\0')
-  rm -f "$dir/$MARKER"
-  rmdir "$dir" 2>/dev/null || echo "  kept $dir: it holds entries that aren't Opal's (or were changed)"
-}
-
-# After removing Opal's file `rel`, remove the folders it was in if they are
-# empty now; a folder you made stays even when empty.
-prune_plugin_dirs() {
-  local dir=$1 rel=$2
-  rel="$(dirname "$rel")"
-  while [[ $rel != "." ]]; do
-    rmdir "$dir/$rel" 2>/dev/null || break
-    rel="$(dirname "$rel")"
-  done
-}
-
-ask() {
-  # ask "question" → 0 for yes. Non-interactive runs answer no.
-  [[ -t 0 ]] || return 1
-  read -r -p "$1 [y/N] " reply
-  [[ $reply =~ ^[Yy] ]]
-}
+MODE=auto
+declare -A CONSENT=()
+for arg in "$@"; do
+  case $arg in
+    --build | --prebuilt | --no-build) MODE=$arg ;;
+    --replace-existing=/*) CONSENT["${arg#--replace-existing=}"]=1 ;;
+    --replace-existing | --replace-existing=*)
+      die "--replace-existing needs the absolute path of the one file to replace, e.g. --replace-existing=$BINDIR/opald" ;;
+    -h | --help) sed -n '2,25p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
+  esac
+done
+[[ $MODE == auto ]] && { command -v cargo >/dev/null && MODE=--build || MODE=--prebuilt; }
 
 # Installed with `omarchy plugin add`, this checkout *is* the plugin. Build
 # outside it: the shell reloads plugins whenever files change in there.
 FROM_PLUGIN_CHECKOUT=0
 if [[ "$REPO" == "$(realpath -m "$PLUGIN_PATH")" ]]; then
   FROM_PLUGIN_CHECKOUT=1
-  export CARGO_TARGET_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opal/build"
+  export CARGO_TARGET_DIR="$CACHEDIR/build"
 fi
 TARGET="${CARGO_TARGET_DIR:-$REPO/target}"
 
-MODE="${1:-auto}"
-case $MODE in
-  auto) command -v cargo >/dev/null && MODE=--build || MODE=--prebuilt ;;
-  --build | --prebuilt | --no-build) ;;
-  *) echo "Unknown option: $MODE (use --build, --prebuilt or --no-build)" >&2; exit 2 ;;
-esac
-
+# ── 1. Build or download ───────────────────────────────────────────────
 download_release() {
   local arch name base dir
   arch="$(uname -m)"
-  [[ $arch == x86_64 || $arch == aarch64 ]] || { echo "No release build for $arch; install Rust to build Opal." >&2; exit 1; }
+  [[ $arch == x86_64 || $arch == aarch64 ]] || die "No release build for $arch; install Rust to build Opal."
   name="opal-v$VERSION-$arch-linux"
   base="https://github.com/$GITHUB_REPO/releases/download/v$VERSION"
-  dir="${XDG_CACHE_HOME:-$HOME/.cache}/opal/release"
-  rm -rf "${dir:?}" && mkdir -p "$dir"
-  echo "Downloading Opal v$VERSION ($arch)"
+  dir="$CACHEDIR/release"
+  rm -rf -- "${dir:?}" && mkdir -p -- "$dir"
+  say "Downloading Opal v$VERSION ($arch)"
   curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/$name.tar.gz" "$base/$name.tar.gz"
   curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/SHA256SUMS" "$base/SHA256SUMS"
-  (cd "$dir" && grep -E "  $name\.tar\.gz\$" SHA256SUMS | sha256sum --check --status) \
-    || { echo "Checksum mismatch for $name.tar.gz; not installing it." >&2; exit 1; }
-  echo "  Checksum OK"
+  (cd "$dir" && grep -F -- "  $name.tar.gz" SHA256SUMS | sha256sum --check --status) \
+    || die "Checksum mismatch for $name.tar.gz; not installing it."
+  note "Checksum OK"
   if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
     gh attestation verify "$dir/$name.tar.gz" --repo "$GITHUB_REPO" >/dev/null \
-      || { echo "Build attestation check failed; not installing it." >&2; exit 1; }
-    echo "  Built by GitHub Actions from $GITHUB_REPO (attestation verified)"
+      || die "Build attestation check failed; not installing it."
+    note "Built by GitHub Actions from $GITHUB_REPO (attestation verified)"
   fi
   tar -xzf "$dir/$name.tar.gz" -C "$dir"
   BIN_SRC="$dir/$name"
@@ -175,106 +82,196 @@ download_release() {
 BIN_SRC="$TARGET/release"
 case $MODE in
   --build)
-    command -v cargo >/dev/null || {
-      echo "Rust is needed to build Opal: sudo pacman -S --needed rustup && rustup default stable" >&2
-      exit 1
-    }
+    command -v cargo >/dev/null \
+      || die "Rust is needed to build Opal: sudo pacman -S --needed rustup && rustup default stable"
     cargo build --locked --release -p opald -p opal-cli
     ;;
   --prebuilt) download_release ;;
 esac
+[[ -f $BIN_SRC/opald && -f $BIN_SRC/opal ]] || die "no built binaries in $BIN_SRC"
 
-# Check everything before changing anything.
-our_binary "$BINDIR/opald" "Opal daemon" \
-  || die "$BINDIR/opald exists and isn't Opal's. Move it aside, then run this again."
-our_binary "$BINDIR/opal" "Control the Opal Nostr signer" \
-  || die "$BINDIR/opal exists and isn't Opal's. Move it aside, then run this again."
-our_unit || die "$UNIT exists and isn't Opal's. Move it aside, then run this again."
-INSTALL_LAUNCHER=1
-if [[ -e $LAUNCHER || -L $LAUNCHER ]] && ! our_launcher; then
-  INSTALL_LAUNCHER=0
-  echo "Note: $LAUNCHER isn't the one this script writes (edited, or not Opal's);"
-  echo "  leaving it and the nostrconnect:// handler as they are."
+# ── 2. Look before touching anything ───────────────────────────────────
+prepare_state
+load_manifest
+load_known
+load_shipped
+print_paths
+
+STOPS=()
+stop() { STOPS+=("$*"); }
+
+declare -A BIN_STATE=() BIN_HASH=()
+for bin in opald opal; do
+  p="$BINDIR/$bin"
+  BIN_STATE[$bin]="$(binary_state "$p")"
+  BIN_HASH[$bin]="$(file_hash "$p")"
+  case ${BIN_STATE[$bin]} in
+    symlink) stop "$p is a symbolic link (to $(readlink -- "$p")); Opal doesn't follow links. Move it aside, then run this again." ;;
+    other) stop "$p exists and isn't a regular file. Move it aside, then run this again." ;;
+  esac
+done
+
+inspect_unit
+UNIT_HASH="$(file_hash "$UNIT")"
+case $UNIT_STATE in
+  elsewhere) stop "opal.service is already provided by $UNIT_FRAGMENT; installing Opal's unit would shadow it. Remove or rename that unit first." ;;
+  symlink) stop "$UNIT is a symbolic link: the unit is masked or linked (systemctl --user mask/link). Opal won't replace it; unmask or unlink it, then run this again." ;;
+  other) stop "$UNIT exists and isn't a regular file. Move it aside, then run this again." ;;
+  foreign) stop "$UNIT exists and isn't Opal's (no Opal mark in it). Move it aside, then run this again." ;;
+esac
+
+inspect_launcher
+LAUNCHER_HASH="$(file_hash "$LAUNCHER")"
+HANDLER_NOW="$(xdg-mime query default x-scheme-handler/nostrconnect 2>/dev/null || true)"
+
+PLUGIN_STATE="$(plugin_dir_state "$PLUGIN_PATH")"
+(( FROM_PLUGIN_CHECKOUT )) && PLUGIN_STATE=checkout
+OLD_PLUGIN_STATE=absent
+[[ $PLUGIN_ID != opal ]] && OLD_PLUGIN_STATE="$(plugin_dir_state "$OLD_PLUGIN_PATH")"
+
+for d in "$DATADIR" "$CONFIGDIR" "$CACHEDIR" "$BINDIR" "$UNITDIR" "$APPDIR" "$PLUGINDIR"; do
+  if [[ -e $d && ! -d $d ]]; then stop "$d exists and isn't a folder. Move it aside, then run this again."; fi
+done
+
+if (( ${#STOPS[@]} )); then
+  say "Not installing: nothing was changed."
+  for s in "${STOPS[@]}"; do note "$s"; done
+  exit 1
 fi
-INSTALL_PLUGIN=1
-if (( FROM_PLUGIN_CHECKOUT )); then
-  INSTALL_PLUGIN=0
-elif [[ -e $PLUGIN_PATH || -L $PLUGIN_PATH ]] && ! our_plugin_copy "$PLUGIN_PATH" "$PLUGIN_ID"; then
-  INSTALL_PLUGIN=0
-  echo "Note: $PLUGIN_PATH exists and wasn't installed by this script"
-  echo "  (e.g. added with 'omarchy plugin add'); leaving it as it is."
-fi
 
-echo "Installing binaries to $BINDIR"
-install -Dm755 "$BIN_SRC/opald" "$BINDIR/opald"
-install -Dm755 "$BIN_SRC/opal" "$BINDIR/opal"
-
-mkdir -p -m 700 "$HOME/.local/share/opal" "$HOME/.config/opal" "$HOME/.cache/opal"
-
-echo "Installing the systemd user service"
-install -Dm644 dist/opal.service "$UNIT"
-systemctl --user daemon-reload
-systemctl --user enable opal.service >/dev/null
-systemctl --user restart opal.service
-
-if (( INSTALL_LAUNCHER )); then
-  echo "nostrconnect:// link handler"
-  mkdir -p "$APPDIR"
-  # Only reached for a missing launcher or our own unchanged one (checked above).
-  render_launcher >"$LAUNCHER"
-  update-desktop-database "$APPDIR" 2>/dev/null || true
-  current="$(xdg-mime query default x-scheme-handler/nostrconnect 2>/dev/null || true)"
-  if [[ -z $current || $current == "opal-nostrconnect.desktop" ]]; then
-    xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect
-  elif ask "  nostrconnect:// links currently open with $current. Open them with Opal instead?"; then
-    xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect
+# ── 3. Questions ───────────────────────────────────────────────────────
+declare -A REPLACE=()
+for bin in opald opal; do
+  p="$BINDIR/$bin"
+  [[ ${BIN_STATE[$bin]} == unrecorded ]] || continue
+  if [[ -n ${CONSENT[$p]:-} ]]; then REPLACE[$bin]=1; continue; fi
+  say "$p exists but isn't recorded as installed by Opal ($(describe_file "$p"))."
+  say "  It may be an earlier Opal you built from source (0.2 and 0.3 installs kept no record),"
+  say "  or another program. If replaced, it is moved to $BACKUPDIR/ and Opal never deletes it."
+  if ask "  Replace $p?"; then
+    REPLACE[$bin]=1
   else
-    echo "  Left $current as the handler (switch any time: xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect)"
+    say "Nothing was changed. Run again with --replace-existing=$p to replace it, or move it aside yourself."
+    exit 1
+  fi
+done
+
+SET_HANDLER=0
+if [[ $LAUNCHER_STATE == missing || $LAUNCHER_STATE == owned ]]; then
+  if [[ -z $HANDLER_NOW || $HANDLER_NOW == opal-nostrconnect.desktop ]]; then
+    SET_HANDLER=1
+  elif ask "nostrconnect:// links currently open with $HANDLER_NOW. Open them with Opal instead?"; then
+    SET_HANDLER=1
   fi
 fi
 
-# Earlier versions installed the plugin under the id "opal".
-if [[ $PLUGIN_ID != "opal" ]] && our_plugin_copy "$PLUGINDIR/opal" "opal"; then
-  echo "Removing the older 'opal' plugin install"
-  omarchy plugin disable opal >/dev/null 2>&1 || true
-  remove_plugin_copy "$PLUGINDIR/opal"
+# ── 4. Write ───────────────────────────────────────────────────────────
+say "Installing binaries to $BINDIR"
+mkdir -p -- "$BINDIR"
+for bin in opald opal; do
+  p="$BINDIR/$bin"
+  case ${BIN_STATE[$bin]} in
+    missing) replace_owned "$BIN_SRC/$bin" "$p" 755 "" ;;
+    owned) replace_owned "$BIN_SRC/$bin" "$p" 755 "${BIN_HASH[$bin]}" ;;
+    unrecorded)
+      backup_file "$p" "$bin"
+      note "moved the previous $p to $BACKUP_DEST"
+      replace_owned "$BIN_SRC/$bin" "$p" 755 "" ;;
+  esac
+done
+
+for d in "$DATADIR" "$CONFIGDIR" "$CACHEDIR"; do
+  [[ -d $d ]] || mkdir -p -m 700 -- "$d"
+done
+
+case $UNIT_STATE in
+  missing)
+    say "Installing the systemd user service"
+    replace_owned dist/opal.service "$UNIT" 644 "" ;;
+  owned)
+    say "Updating the systemd user service"
+    replace_owned dist/opal.service "$UNIT" 644 "$UNIT_HASH" ;;
+  edited)
+    say "Keeping your $UNIT (you changed it; Opal's version isn't installed)" ;;
+esac
+(( UNIT_DROPIN )) && note "$UNIT.d/ drop-ins are yours; not touched."
+
+LAUNCHER_WRITTEN=0
+case $LAUNCHER_STATE in
+  missing | owned)
+    say "nostrconnect:// link handler"
+    tmp="$(mktemp)"; TEMPS+=("$tmp")
+    render_launcher >"$tmp"
+    if [[ $LAUNCHER_STATE == missing ]]; then replace_owned "$tmp" "$LAUNCHER" 644 ""
+    else replace_owned "$tmp" "$LAUNCHER" 644 "$LAUNCHER_HASH"; fi
+    LAUNCHER_WRITTEN=1 ;;
+  other) say "Keeping $LAUNCHER: it's a link or not a file, so not Opal's. The nostrconnect:// handler is left as it is." ;;
+  foreign) say "Keeping $LAUNCHER: it isn't the one this script writes (you changed it, or it's another program's). The nostrconnect:// handler is left as it is." ;;
+esac
+
+OLD_PLUGIN_REMOVED=0
+if [[ $OLD_PLUGIN_STATE == dir ]]; then
+  say "Removing the older 'opal' plugin install ($OLD_PLUGIN_PATH)"
+  remove_plugin_copy "$OLD_PLUGIN_PATH" && OLD_PLUGIN_REMOVED=1
 fi
 
-if (( FROM_PLUGIN_CHECKOUT )); then
-  echo "Shell plugin: installed by 'omarchy plugin add' ($PLUGIN_ID)"
-elif (( INSTALL_PLUGIN )); then
-  echo "Installing the Omarchy shell plugin ($PLUGIN_ID)"
-  mkdir -p "$PLUGINDIR"
-  # Copied, not linked: the shell's file watcher doesn't follow symlinks.
-  # Built next to the destination, then swapped in.
-  staging="$(mktemp -d "$PLUGINDIR/.$PLUGIN_ID.XXXXXX")"
-  cp -r shell-plugin/. "$staging/"
-  # The repo's single manifest points into shell-plugin/; here the files sit
-  # at the top of the plugin folder.
-  jq '.entryPoints |= with_entries(.value |= ltrimstr("shell-plugin/"))' manifest.json \
-    >"$staging/manifest.json"
-  # Record what Opal put there, before anything of yours is carried over.
-  {
-    echo "https://github.com/derekross/opal"
-    (cd "$staging" && find . -type f ! -name "$MARKER" -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum)
-  } >"$staging/$MARKER"
-  chmod 755 "$staging"
-  if [[ -e $PLUGIN_PATH ]]; then
-    # Only reached for our own earlier copy (checked above). Everything in
-    # it is either Opal's and unchanged (replaced by the new copy) or yours
-    # (carried into the new copy), so the old folder can go.
-    merge_plugin_copy "$PLUGIN_PATH" "$staging"
-    rm -rf "${PLUGIN_PATH:?}"
+PLUGIN_CREATED=0 PLUGIN_TOUCHED=0
+case $PLUGIN_STATE in
+  checkout)
+    if (( FROM_PLUGIN_CHECKOUT )); then say "Shell plugin: this checkout, installed by 'omarchy plugin add' ($PLUGIN_ID)"
+    else say "Keeping $PLUGIN_PATH: it's a checkout (has .git); update it with: omarchy plugin update $PLUGIN_ID"; fi ;;
+  missing)
+    say "Installing the Omarchy shell plugin ($PLUGIN_ID)"
+    create_plugin_copy "$PLUGIN_PATH"
+    PLUGIN_CREATED=1 PLUGIN_TOUCHED=1 ;;
+  dir)
+    say "Updating the Omarchy shell plugin ($PLUGIN_ID)"
+    update_plugin_copy "$PLUGIN_PATH" && PLUGIN_TOUCHED=1 ;;
+  symlink) say "Keeping $PLUGIN_PATH: it's a link, so not Opal's; the plugin isn't installed." ;;
+  other) say "Keeping $PLUGIN_PATH: it isn't a folder, so not Opal's; the plugin isn't installed." ;;
+esac
+
+# ── 5. Services and the shell ──────────────────────────────────────────
+case $UNIT_STATE in
+  missing)
+    systemctl_user daemon-reload
+    systemctl_user enable --now opal.service
+    say "opal.service enabled and started." ;;
+  owned | edited)
+    systemctl_user daemon-reload
+    if unit_is_active && unit_runs_our_binary; then
+      systemctl_user restart opal.service
+      say "opal.service restarted with the new build."
+    elif unit_is_active; then
+      say "opal.service is running but doesn't start $BINDIR/opald; restart it yourself if you want the new build."
+    else
+      say "opal.service isn't running; not started (start it with: systemctl --user start opal.service)."
+    fi ;;
+esac
+
+if (( LAUNCHER_WRITTEN )); then
+  update-desktop-database "$APPDIR" >/dev/null 2>&1 || true
+  if (( SET_HANDLER )); then
+    if xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect 2>/dev/null; then
+      note "nostrconnect:// links open with Opal."
+    else
+      note "couldn't set the nostrconnect:// handler (xdg-mime failed); set it with: xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect"
+    fi
+  else
+    note "Left $HANDLER_NOW as the nostrconnect:// handler (switch any time: xdg-mime default opal-nostrconnect.desktop x-scheme-handler/nostrconnect)"
   fi
-  mv "$staging" "$PLUGIN_PATH"
 fi
+
 if command -v omarchy >/dev/null; then
-  omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
-  omarchy plugin enable "$PLUGIN_ID" --section right --before omarchy.tray >/dev/null 2>&1 \
-    || omarchy plugin enable "$PLUGIN_ID" --section right >/dev/null 2>&1 || true
+  if (( OLD_PLUGIN_REMOVED )); then omarchy plugin disable opal >/dev/null 2>&1 || true; fi
+  if (( PLUGIN_TOUCHED || OLD_PLUGIN_REMOVED )); then omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true; fi
+  if (( PLUGIN_CREATED )); then
+    omarchy plugin enable "$PLUGIN_ID" --section right --before omarchy.tray >/dev/null 2>&1 \
+      || omarchy plugin enable "$PLUGIN_ID" --section right >/dev/null 2>&1 || true
+  fi
 fi
 
-echo
-systemctl --user --no-pager --lines=0 status opal.service | head -3
-echo
-echo "Done. Click the Opal gem in the bar to add a key or watch someone."
+say
+{ systemctl --user --no-pager --lines=0 status opal.service 2>/dev/null | head -3; } || true
+say
+say "Done. Click the Opal gem in the bar to add a key or watch someone."

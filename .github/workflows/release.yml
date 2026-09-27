@@ -42,6 +42,9 @@ jobs:
           cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
           echo "tag=$tag manifest=$manifest cargo=$cargo_version"
           [[ $tag == "$manifest" && $tag == "$cargo_version" ]]
+          # Every file this tag installs must be in the table the installer
+          # uses to recognise its own files later.
+          ./dist/gen-known-hashes.sh --check
 
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
@@ -52,6 +55,10 @@ jobs:
 
       - name: Build
         run: cargo build --locked --release -p opald -p opal-cli
+
+      - name: Installer tests (sandboxed HOME, stubbed systemctl/omarchy)
+        if: matrix.arch == 'x86_64'
+        run: OPAL_TEST_BINARIES=target/release tests/install/run.sh
 
       - name: Package
         id: package

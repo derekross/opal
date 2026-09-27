@@ -51,7 +51,7 @@ Opal holds your nsec, so it's built to be careful:
 - **Remote apps get nothing without a connection**, and only what their policy or you allow once connected. Strangers get no reply at all.
 - **Untrusted text is only ever shown as plain text** in the panel and in popups; images are https-only.
 - **Hardened systemd unit**: no capabilities, seccomp filter, read-only home except Opal's own directories.
-- **The installer only touches what it installed.** The binaries and the service unit carry a mark; the `nostrconnect://` launcher and every file in the plugin copy are only replaced or removed while they are exactly what the installer wrote (the plugin copy's `.installed-by-opal` lists their hashes). Edit a file and it's yours; add one and it stays. Anything else at those paths is left alone, and for the binaries and unit the install stops. Changing the default `nostrconnect://` handler asks first.
+- **The installer only touches what it can prove it wrote.** Every file `install.sh` writes is recorded with its SHA-256 in `~/.local/state/opal/installed.tsv`, and `dist/known-hashes.tsv` lists every file each Opal version has installed. A path is replaced or removed only while it is a regular file (never a link or a folder) whose hash matches one of those, and every replacement checks the bytes it swapped out, after the swap, so an edit made in between is kept. Everything else (a file you edited, one you added, a link, a folder, another program's `opal`, a masked unit) stays and is named in the output; where going on isn't safe (a binary or unit that isn't Opal's) the install stops before writing anything. Binaries from before Opal kept records are replaced only with your consent and a backup Opal never deletes. Changing the default `nostrconnect://` handler asks first. `tests/install/` exercises all of this against a sandboxed home on every release.
 
 ## Requirements
 
@@ -86,6 +86,13 @@ enables the `opal.service` systemd user service, registers the
 `nostrconnect://` link handler (asking first if another app has it), and puts
 the Opal gem in the bar. Click it to add a key or watch someone.
 
+It records what it writes in `~/.local/state/opal/installed.tsv` (path and
+SHA-256), checks every path before it changes anything, and prints what it
+keeps. If `~/.local/bin/opald` or `opal` already exists without a record (an
+Opal 0.2 or 0.3 you built from source, or something else), it asks before
+replacing it; for a non-interactive run pass `--replace-existing=<path>` for
+each. The old file is moved to `~/.local/state/opal/backup/` and never deleted.
+
 **Binaries.** With Rust installed, `install.sh` builds from source. Without it,
 it downloads the release matching the plugin's version from
 [GitHub Releases](https://github.com/derekross/opal/releases). Each release is
@@ -103,7 +110,11 @@ omarchy plugin update derekross.opal
 ```
 
 (From a clone: `git pull && ./dist/install.sh`.) Updating keeps your keys and
-settings.
+settings. The unit, launcher and plugin files from any earlier Opal version
+are recognised by their release hashes and replaced; a file you edited stays,
+the output says so, and Opal's version of it isn't installed. The service is
+enabled on first install only; an update restarts it if it is running Opal's
+binary, and never re-enables one you disabled.
 
 ## Remove
 
@@ -112,10 +123,18 @@ settings.
 omarchy plugin remove derekross.opal                             # if added with omarchy plugin add
 ```
 
-This stops and removes the service, binaries, link handler and plugin. Your
-keys stay in the keyring (encrypted) along with Opal's settings and history,
-so reinstalling picks up where you left off. To delete those too, export a
-backup of your keys first, then run `uninstall.sh --purge`.
+This stops and removes the service, binaries, link handler and plugin, but
+only what it can verify Opal wrote: a unit, launcher or plugin file you edited
+stays (a changed unit is stopped, not disabled, and the script tells you what
+to do), a masked or linked unit and a unit provided from elsewhere are left
+alone, folders keep anything you added, and only Opal's own entry is taken out
+of `mimeapps.list`. Your keys stay in the keyring (encrypted) along with
+Opal's settings and history, so reinstalling picks up where you left off. To
+delete those too, export a backup of your keys first, then run
+`uninstall.sh --purge`: it removes `$XDG_DATA_HOME/opal`, `$XDG_CONFIG_HOME/opal`
+and `$XDG_CACHE_HOME/opal`, clears Opal's own keyring items and reports how
+many were actually cleared. Backups in `~/.local/state/opal/backup/` are never
+deleted, not even by `--purge`.
 
 ## Use
 
@@ -212,9 +231,10 @@ crates/opal-status   statuses and scrobbles (MPRIS, music tracker, auto statuses
 crates/opald         the daemon: socket API, modules, locking, desktop popups
 crates/opal-cli      the `opal` command
 shell-plugin         Omarchy shell plugin (bar gem, panel, approval dialog)
-dist                 systemd unit, link handler, install script
+dist                 systemd unit, link handler, install/uninstall scripts, known release hashes
 .github/workflows    release builds (tag vX.Y.Z → GitHub Release)
 docs/nip-scrobble.md draft NIP for kind 1073 scrobbles
+tests/install        installer tests (sandboxed HOME, stubbed systemctl/omarchy)
 tests/interop        nostr-tools BunkerSigner against the signer
 ```
 
@@ -224,12 +244,16 @@ tests/interop        nostr-tools BunkerSigner against the signer
 cargo test                                             # unit + end-to-end tests
 cargo test -p opal-core --test keyring -- --ignored    # real Secret Service
 (cd tests/interop && npm install && npm test)          # nostr-tools interop
+tests/install/run.sh                                   # install/uninstall against a sandboxed home
 ./dist/dev-plugin.sh                                   # sync the shell plugin and reload it
 ```
 
-To release, bump the version in `manifest.json` and `Cargo.toml`, commit, then
+To release, bump the version in `manifest.json` and `Cargo.toml`, run
+`./dist/gen-known-hashes.sh > dist/known-hashes.tsv` (the installer's table of
+every file each version installs), commit, then
 `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow checks that all three
-match, runs the tests, and publishes the binaries.
+versions match and the table covers the tag, runs the tests, and publishes
+the binaries.
 
 The plugin's service is `keepLoaded`, so changes to `OpalService.qml` need
 `omarchy-restart-shell`. For experiments, run a separate daemon that can't

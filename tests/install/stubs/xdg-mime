@@ -1,0 +1,4 @@
+#!/bin/sh
+echo "xdg-mime $*" >> "${FAKE_LOG:-/dev/null}"
+[ "$1" = query ] && printf '%s\n' "${FAKE_MIME:-}"
+exit 0
