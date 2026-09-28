@@ -26,6 +26,16 @@ Item {
   readonly property var offer: svc && svc.signerOn && svc.offers.length > 0 ? svc.offers[0] : null
   // A program on this computer asking to pair (as opposed to a nostrconnect:// link).
   readonly property bool localOffer: !!offer && offer.type === "local"
+  // What a local program declared, as two lines instead of one per kind.
+  function kindList(sensitive) {
+    if (!localOffer || !offer.kinds) return ""
+    return offer.kinds
+      .filter(function(k) { return !!k.sensitive === sensitive })
+      .map(function(k) { return k.label + " (" + k.kind + ")" })
+      .join(", ")
+  }
+  readonly property string plainKinds: kindList(false)
+  readonly property string sensitiveKinds: kindList(true)
   readonly property var prompt: svc && svc.signerOn && svc.prompts.length > 0 ? svc.prompts[0] : null
   readonly property bool needUnlock: !!svc && svc.locked && svc.hasAccounts && (!!svc.unlockRequest || !!prompt)
   // Requests are waiting but this shell can't see them until it proves the
@@ -189,7 +199,11 @@ Item {
       id: card
       anchors.centerIn: parent
       width: Math.min(Style.space(460), window.width - Style.space(40))
-      implicitHeight: content.implicitHeight + Style.space(40)
+      // Never taller than the screen: a long permission list scrolls and
+      // the buttons stay in reach.
+      implicitHeight: Math.min(
+        content.implicitHeight + footer.implicitHeight + Style.space(52),
+        window.height - Style.space(40))
       radius: Style.cornerRadius
       color: Color.popups.background
       borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
@@ -208,12 +222,24 @@ Item {
           }
         }
 
-        Column {
-          id: content
+        Flickable {
+          id: scroller
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.top: parent.top
+          anchors.bottom: footer.top
           anchors.margins: Style.space(20)
+          anchors.bottomMargin: Style.space(12)
+          contentWidth: width
+          contentHeight: content.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          interactive: contentHeight > height
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: content
+          width: scroller.width
           spacing: Style.space(12)
 
           // Title
@@ -312,18 +338,25 @@ Item {
               text: "WHAT IT MAY ASK FOR"
               foreground: root.dim
             }
-            Repeater {
-              model: root.localOffer ? root.offer.kinds : []
-              delegate: Text {
-                required property var modelData
-                textFormat: Text.PlainText
-                width: parent ? parent.width : 0
-                wrapMode: Text.Wrap
-                color: root.foreground
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-                text: "Sign: " + modelData.label + " (kind " + modelData.kind + ")" + (modelData.sensitive ? " · always asks" : "")
-              }
+            Text {
+              textFormat: Text.PlainText
+              visible: root.localOffer && root.plainKinds !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              text: "Sign: " + root.plainKinds
+            }
+            Text {
+              textFormat: Text.PlainText
+              visible: root.localOffer && root.sensitiveKinds !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              text: "Sign, asking each time: " + root.sensitiveKinds
             }
             Text {
               textFormat: Text.PlainText
@@ -517,6 +550,18 @@ Item {
             }
           }
 
+        }
+        }
+
+        // ── Footer: the error, and the actions, always in reach ──
+        Column {
+          id: footer
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          anchors.margins: Style.space(20)
+          spacing: Style.space(8)
+
           Text {
             textFormat: Text.PlainText
             width: parent.width
@@ -528,7 +573,6 @@ Item {
             text: root.error
           }
 
-          // ── Actions ────────────────────────────────────────────
           Row {
             anchors.right: parent.right
             spacing: Style.space(8)
