@@ -68,11 +68,13 @@ pub struct ConnectionInfo {
     pub last_used: Option<u64>,
     pub expires_unused_at: Option<u64>,
     /// Local apps: the program it was paired from, the kinds it declared,
-    /// and whether it may encrypt to the user's own key.
+    /// whether it may encrypt to the user's own key, and whether it may
+    /// encrypt to other keys (private messages).
     pub exe: Option<String>,
     pub unit: Option<String>,
     pub kinds: Vec<u16>,
     pub nip44: bool,
+    pub dm: bool,
 }
 
 impl Connection {
@@ -109,6 +111,7 @@ impl Connection {
             unit: None,
             kinds: Vec::new(),
             nip44: false,
+            dm: false,
         }
     }
 

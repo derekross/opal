@@ -35,6 +35,7 @@ pub struct LocalOffer {
     pub account: PublicKey,
     pub kinds: Vec<u16>,
     pub nip44: bool,
+    pub dm: bool,
     pub peer: Peer,
     pub tx: oneshot::Sender<Result<(ConnectionInfo, Zeroizing<String>), String>>,
 }
@@ -79,6 +80,7 @@ impl LocalOffer {
             "account_label": account_label,
             "kinds": kinds,
             "nip44": self.nip44,
+            "dm": self.dm,
             "perms": perms,
         })
     }

@@ -79,6 +79,10 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE apps ADD COLUMN unit TEXT;
 "#,
+    // Local apps that send private messages (NIP-17) encrypt to other keys.
+    r#"
+    ALTER TABLE apps ADD COLUMN dm INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 /// An app as stored, without its transport secret key.
@@ -115,6 +119,8 @@ pub struct LocalAppRecord {
     pub kinds: Vec<u16>,
     /// May encrypt and decrypt to the user's own key (its private data).
     pub nip44: bool,
+    /// May encrypt to other keys, to send private messages (NIP-17).
+    pub dm: bool,
     /// `/proc/<pid>/exe` of the process that paired, if readable.
     pub exe: Option<String>,
     /// The systemd unit it paired from, if any.
@@ -253,9 +259,9 @@ impl SignerStore {
             c.execute(
                 "INSERT INTO apps (id, account, transport_pubkey, name, relays, policy,
                                    requested_perms, created_at, last_used,
-                                   kind, app_key, token_hash, exe, kinds, nip44, unit)
+                                   kind, app_key, token_hash, exe, kinds, nip44, unit, dm)
                  VALUES (?1, ?2, 'local:' || ?1, ?3, '[]', ?4, '[]', ?5, ?6,
-                         'local', ?7, ?8, ?9, ?10, ?11, ?12)
+                         'local', ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(id) DO UPDATE SET
                     account = excluded.account,
                     name = excluded.name,
@@ -266,7 +272,8 @@ impl SignerStore {
                     exe = excluded.exe,
                     kinds = excluded.kinds,
                     nip44 = excluded.nip44,
-                    unit = excluded.unit",
+                    unit = excluded.unit,
+                    dm = excluded.dm",
                 params![
                     a.id,
                     a.account.to_hex(),
@@ -280,6 +287,7 @@ impl SignerStore {
                     kinds,
                     a.nip44,
                     a.unit,
+                    a.dm,
                 ],
             )
             .map(|_| ())
@@ -569,6 +577,7 @@ fn local_app_from_row(r: &Row<'_>) -> rusqlite::Result<Option<LocalAppRecord>> {
             .and_then(|k| serde_json::from_str(&k).ok())
             .unwrap_or_default(),
         nip44: r.get("nip44")?,
+        dm: r.get("dm")?,
         exe: r.get("exe")?,
         unit: r.get("unit")?,
         token_hash,
@@ -593,6 +602,7 @@ mod tests {
             policy: Policy::Basic,
             kinds: vec![30078, 22242],
             nip44: true,
+            dm: true,
             exe: Some("/home/me/.local/bin/peridotd".into()),
             unit: Some("peridot.service".into()),
             token_hash: hash_secret(&format!("token-{id}")),
@@ -610,6 +620,7 @@ mod tests {
         assert_eq!(got.id, "l1");
         assert_eq!(got.kinds, vec![30078, 22242]);
         assert!(got.nip44);
+        assert!(got.dm);
         assert_eq!(got.exe.as_deref(), Some("/home/me/.local/bin/peridotd"));
         assert_eq!(got.unit.as_deref(), Some("peridot.service"));
         assert_eq!(got.policy, Policy::Basic);
@@ -639,12 +650,14 @@ mod tests {
         // Re-pairing keeps the id and replaces what the pairing decided.
         a.token_hash = hash_secret("token-2");
         a.kinds = vec![30078];
+        a.dm = false;
         a.exe = None;
         a.unit = Some("app-dev.scope".into());
         s.save_local_app(&a).unwrap();
         assert_eq!(s.local_apps().unwrap().len(), 1);
         let got = s.local_app("l1").unwrap().unwrap();
         assert_eq!(got.kinds, vec![30078]);
+        assert!(!got.dm);
         assert_eq!(got.exe, None);
         assert_eq!(got.unit.as_deref(), Some("app-dev.scope"));
         assert!(

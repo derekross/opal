@@ -337,6 +337,16 @@ Item {
             }
             Text {
               textFormat: Text.PlainText
+              visible: root.localOffer && root.offer.dm
+              width: parent.width
+              wrapMode: Text.Wrap
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              text: "Send private messages as you (NIP-17) · always asks"
+            }
+            Text {
+              textFormat: Text.PlainText
               visible: root.localOffer
               width: parent.width
               wrapMode: Text.Wrap

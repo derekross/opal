@@ -546,6 +546,9 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 kinds: Vec<u16>,
                 #[serde(default)]
                 nip44: bool,
+                /// Will encrypt to other keys, to send private messages.
+                #[serde(default)]
+                dm: bool,
                 pubkey: Option<String>,
             }
             let p: P = parse(params)?;
@@ -559,8 +562,8 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             let mut kinds = p.kinds;
             kinds.sort_unstable();
             kinds.dedup();
-            if kinds.is_empty() && !p.nip44 {
-                bail!("declare at least one kind or nip44");
+            if kinds.is_empty() && !p.nip44 && !p.dm {
+                bail!("declare at least one kind, nip44 or dm");
             }
             if kinds.len() > opal_signer::local::MAX_KINDS {
                 bail!("too many kinds (max {})", opal_signer::local::MAX_KINDS);
@@ -586,6 +589,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                     account,
                     kinds,
                     nip44: p.nip44,
+                    dm: p.dm,
                     peer: peer.clone(),
                     tx,
                 };
@@ -655,6 +659,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 policy,
                 kinds: offer.kinds,
                 nip44: offer.nip44,
+                dm: offer.dm,
                 exe: offer.peer.exe,
                 unit: offer.peer.unit,
                 grant,
@@ -707,6 +712,8 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 token: Zeroizing<String>,
                 op: String,
                 content: String,
+                /// The other key; the app's own account when absent.
+                pubkey: Option<String>,
             }
             let p: P = parse(params)?;
             let paired = local_app(app, peer, &p.token)?;
@@ -715,10 +722,16 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 "decrypt" => Method::Nip44Decrypt,
                 _ => bail!("op must be encrypt or decrypt"),
             };
-            // Only to the user's own key: enough for an app's private data.
+            // The user's own key for an app's private data; another key
+            // only to send a private message, and only if it asked for
+            // that when it paired (checked in `local_request`).
+            let with = match p.pubkey.as_deref() {
+                Some(hex) => PublicKey::from_hex(hex).context("bad pubkey")?,
+                None => paired.account,
+            };
             let op = Op::Cipher {
                 method,
-                with: paired.account,
+                with,
                 text: p.content,
             };
             match app
@@ -1366,6 +1379,13 @@ mod tests {
         json!({"app": "peridot", "name": "Peridot", "kinds": [30078, 24242], "nip44": true})
     }
 
+    /// The same app, also asking to send private messages.
+    fn connect_params_dm() -> Value {
+        let mut p = connect_params();
+        p["dm"] = json!(true);
+        p
+    }
+
     async fn wait_for_offer(app: &Arc<App>) -> Value {
         for _ in 0..100 {
             let offers = call(app, &ui(), "app.offers", json!(null)).await.unwrap();
@@ -1379,9 +1399,20 @@ mod tests {
 
     /// Run `app.connect` from `exe` and accept it with `grant`; returns the token.
     async fn pair(app: &Arc<App>, exe: &str, policy: &str, grant: Vec<&str>) -> String {
+        pair_with(app, exe, policy, grant, connect_params()).await
+    }
+
+    /// `pair` with the app's own `app.connect` params.
+    async fn pair_with(
+        app: &Arc<App>,
+        exe: &str,
+        policy: &str,
+        grant: Vec<&str>,
+        params: Value,
+    ) -> String {
         let connect = {
             let (app, peer) = (app.clone(), peer(exe));
-            tokio::spawn(async move { call(&app, &peer, "app.connect", connect_params()).await })
+            tokio::spawn(async move { call(&app, &peer, "app.connect", params).await })
         };
         let offer = wait_for_offer(app).await;
         assert_eq!(offer["type"], json!("local"));
@@ -1487,10 +1518,120 @@ mod tests {
         assert!(err.starts_with("paired with a different program"), "{err}");
         let err = sign(ui(), token.clone(), 30078).await.unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
-        let err = sign(unit_peer("peridot.service"), token, 30078)
+        let err = sign(unit_peer("peridot.service"), token.clone(), 30078)
             .await
             .unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
+
+        // Encryption goes to its own account unless it asked to send private
+        // messages; this pairing didn't.
+        let other = Keys::generate().public_key().to_hex();
+        let err = call(
+            &app,
+            &peer(exe),
+            "app.nip44",
+            json!({"token": token, "op": "encrypt", "content": "x", "pubkey": other}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Peridot didn't ask to send private messages when it paired"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_nip44_with_dm_encrypts_to_a_peer_but_never_decrypts_one() {
+        let (app, pk) = test_app().await;
+        let exe = "/home/me/.local/bin/peridotd";
+        let token = pair_with(
+            &app,
+            exe,
+            "basic",
+            vec!["nip44_encrypt"],
+            connect_params_dm(),
+        )
+        .await;
+        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
+        assert_eq!(apps[0]["dm"], json!(true));
+        assert_eq!(apps[0]["nip44"], json!(true));
+        let nip44 = |op: &str, content: String, pubkey: Option<String>| {
+            let (app, token) = (app.clone(), token.clone());
+            let mut params = json!({"token": token, "op": op, "content": content});
+            if let Some(pk) = pubkey {
+                params["pubkey"] = json!(pk);
+            }
+            async move {
+                call(&app, &peer(exe), "app.nip44", params)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        };
+
+        let recipient = Keys::generate();
+        let out = nip44(
+            "encrypt",
+            "hello".into(),
+            Some(recipient.public_key().to_hex()),
+        )
+        .await
+        .unwrap();
+        let cipher = out["content"].as_str().unwrap();
+        assert_eq!(
+            nostr_sdk::prelude::nip44::decrypt(recipient.secret_key(), &pk, cipher).unwrap(),
+            "hello"
+        );
+
+        let reply = nostr_sdk::prelude::nip44::encrypt(
+            recipient.secret_key(),
+            &pk,
+            "hi back",
+            nostr_sdk::prelude::nip44::Version::V2,
+        )
+        .unwrap();
+        assert_eq!(
+            nip44("decrypt", reply, Some(recipient.public_key().to_hex()))
+                .await
+                .unwrap_err(),
+            "local apps only decrypt their own data"
+        );
+        assert_eq!(
+            nip44("encrypt", "x".into(), Some("zz".into()))
+                .await
+                .unwrap_err(),
+            "bad pubkey"
+        );
+
+        // Naming its own account is the same as leaving it out.
+        let own = nip44("encrypt", "mine".into(), Some(pk.to_hex()))
+            .await
+            .unwrap();
+        let own = own["content"].as_str().unwrap().to_string();
+        // Decrypting its own data still asks, as before.
+        let mut rx = app.prompts.subscribe();
+        let answerer = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                while let Ok(ev) = rx.recv().await {
+                    if let PromptEvent::Opened { prompt } = ev {
+                        assert_eq!(prompt.request.method, Method::Nip44Decrypt);
+                        call(
+                            &app,
+                            &ui(),
+                            "prompts.answer",
+                            json!({"id": prompt.id, "allow": true}),
+                        )
+                        .await
+                        .unwrap();
+                        return true;
+                    }
+                }
+                false
+            })
+        };
+        let plain = nip44("decrypt", own, None).await.unwrap();
+        assert_eq!(plain["content"], json!("mine"));
+        assert!(answerer.await.unwrap(), "a prompt was shown");
     }
 
     #[tokio::test]

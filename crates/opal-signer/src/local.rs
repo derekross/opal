@@ -35,6 +35,8 @@ pub struct LocalPairing {
     pub policy: Policy,
     pub kinds: Vec<u16>,
     pub nip44: bool,
+    /// May encrypt to other keys, to send private messages (NIP-17).
+    pub dm: bool,
     pub exe: Option<PathBuf>,
     pub unit: Option<String>,
     /// `(method, kind)` pairs to allow from now on; filtered to
@@ -85,6 +87,7 @@ pub fn local_info(a: &LocalAppRecord) -> ConnectionInfo {
         unit: a.unit.clone(),
         kinds: a.kinds.clone(),
         nip44: a.nip44,
+        dm: a.dm,
     }
 }
 
@@ -126,6 +129,7 @@ impl Signer {
             policy: p.policy,
             kinds: p.kinds,
             nip44: p.nip44,
+            dm: p.dm,
             exe: p.exe.map(|e| e.to_string_lossy().into_owned()),
             unit: p.unit,
             token_hash: hash_secret(&token),
@@ -208,14 +212,33 @@ impl Signer {
                 }
             }
             Op::Cipher { method, with, .. } => {
-                if !a.nip44 || !matches!(method, Method::Nip44Encrypt | Method::Nip44Decrypt) {
+                if !matches!(method, Method::Nip44Encrypt | Method::Nip44Decrypt) {
                     return Err(format!(
                         "{} didn't ask for encryption when it paired",
                         a.name
                     ));
                 }
-                if *with != a.account {
-                    return Err("local apps only encrypt to their own account".into());
+                if *with == a.account {
+                    // Its own data: what `nip44` covers.
+                    if !a.nip44 {
+                        return Err(format!(
+                            "{} didn't ask for encryption when it paired",
+                            a.name
+                        ));
+                    }
+                } else {
+                    // Another key: only to seal a private message (NIP-17),
+                    // and only outgoing. What others sent is never opened
+                    // for a local app.
+                    if *method == Method::Nip44Decrypt {
+                        return Err("local apps only decrypt their own data".into());
+                    }
+                    if !a.dm {
+                        return Err(format!(
+                            "{} didn't ask to send private messages when it paired",
+                            a.name
+                        ));
+                    }
                 }
             }
             Op::GetPublicKey => {}
@@ -335,6 +358,7 @@ mod tests {
             policy: Policy::Basic,
             kinds: vec![],
             nip44: false,
+            dm: false,
             exe: Some("/usr/bin/peridotd".into()),
             unit: Some("peridot.service".into()),
             token_hash: String::new(),

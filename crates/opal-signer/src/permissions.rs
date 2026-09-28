@@ -35,6 +35,8 @@ pub const SENSITIVE_KINDS: &[u16] = &[
     0,     // profile
     3,     // follow list
     5,     // deletion
+    13,    // seal (a private message going out)
+    14,    // direct message
     62,    // request to vanish
     9735,  // zap receipt
     10000, // mute list
@@ -387,10 +389,9 @@ mod tests {
             vec![
                 (Method::SignEvent, Some(1)),
                 (Method::Nip44Encrypt, None),
-                (Method::SignEvent, Some(14)),
                 (Method::SignEvent, Some(15)),
             ],
-            "DM relay list (10050) is sensitive"
+            "direct message (14) and DM relay list (10050) are sensitive"
         );
     }
 

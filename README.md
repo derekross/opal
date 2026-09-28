@@ -174,15 +174,17 @@ with every request, and each request goes through the same policy, saved
 answers and prompts as a NIP-46 app.
 
 **Pairing.** The program calls `app.connect` with its id, a display name,
-the event kinds it will ask for and whether it needs NIP-44 encryption of
-its own data. The approval dialog shows all of that plus where the program
-runs (its systemd unit, e.g. `peridot.service`, and its executable path when
-that can be read) and the account it would sign as. You pick a
-policy and tick what it may always do; sensitive kinds (Blossom and HTTP
-auth, relay logins, deletions…) and decryption can't be pre-allowed, so they
-ask each time, remembered for an hour at most, unless you give the app full
-trust (which needs your passphrase). Pairing again replaces the earlier
-pairing: new token, fresh rules.
+the event kinds it will ask for, whether it needs NIP-44 encryption of its
+own data, and whether it will send private messages (NIP-17), which means
+encrypting to other people's keys. The approval dialog shows all of that
+plus where the program runs (its systemd unit, e.g. `peridot.service`, and
+its executable path when that can be read) and the account it would sign
+as. You pick a policy and tick what it may always do; sensitive kinds
+(Blossom and HTTP auth, relay logins, deletions, the seal of a private
+message…) and decryption can't be pre-allowed, so they ask each time,
+remembered for an hour at most, unless you give the app full trust (which
+needs your passphrase). Pairing again replaces the earlier pairing: new
+token, fresh rules.
 
 **Afterwards.** The app is listed under Apps with where it paired from;
 change its policy, delete saved answers or revoke it there. Revoking stops
@@ -213,20 +215,23 @@ The methods, over `$XDG_RUNTIME_DIR/opal.sock` (newline-delimited JSON, see
 `crates/opal-core/src/ipc.rs`):
 
 ```jsonc
-{"id":1,"method":"app.connect","params":{"app":"peridot","name":"Peridot","kinds":[30078,22242,24242],"nip44":true,"pubkey":"<hex, optional>"}}
+{"id":1,"method":"app.connect","params":{"app":"peridot","name":"Peridot","kinds":[30078,22242,24242],"nip44":true,"dm":false,"pubkey":"<hex, optional>"}}
 // blocks until you answer (5 minutes at most) → {"token":"<64 hex>","pubkey":"<hex>"}
 // or an error: "declined", "timed out", "that app is already waiting for your approval"
 {"id":2,"method":"app.sign","params":{"token":"…","event":{"pubkey":"…","created_at":1727300000,"kind":30078,"tags":[],"content":"…"}}}
 // → the signed event
 {"id":3,"method":"app.nip44","params":{"token":"…","op":"encrypt","content":"…"}}   // op: encrypt | decrypt, to the app's own account
 // → {"content":"…"}
+{"id":3,"method":"app.nip44","params":{"token":"…","op":"encrypt","content":"…","pubkey":"<recipient hex>"}}   // to another key: needs "dm", encrypt only
 {"id":4,"method":"app.status","params":{"token":"…"}}
 // → {"pubkey":"…","name":"Peridot","policy":"basic"}
 ```
 
 Errors apps should expect: `not paired` (unknown or revoked token: pair
 again), `paired with a different program (<path>); pair again`, `Opal is
-locked`, `<name> didn't declare kind <n> when it paired`, `user rejected`,
+locked`, `<name> didn't declare kind <n> when it paired`, `<name> didn't ask
+to send private messages when it paired`, `local apps only decrypt their own
+data`, `user rejected`,
 `denied by a saved rule`, `timed out waiting for approval` and
 `too many pending requests`.
 

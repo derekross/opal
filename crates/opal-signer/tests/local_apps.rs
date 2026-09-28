@@ -81,6 +81,7 @@ fn pairing(e: &Env, policy: Policy, grant: &[(Method, Option<u16>)]) -> LocalPai
         policy,
         kinds: vec![30078, 22242, 24242],
         nip44: true,
+        dm: false,
         exe: Some(EXE.into()),
         unit: Some(UNIT.into()),
         grant: grant.to_vec(),
@@ -130,6 +131,7 @@ async fn pairing_creates_row_rules_and_token() {
     assert_eq!(info.unit.as_deref(), Some(UNIT));
     assert_eq!(info.kinds, vec![30078, 22242, 24242]);
     assert!(info.nip44);
+    assert!(!info.dm);
     assert_eq!(token.len(), 64);
     assert!(matches!(
         events.try_recv(),
@@ -402,6 +404,7 @@ async fn nip44_is_self_only_and_decrypt_asks() {
     assert_eq!(plain, "secret");
     assert_eq!(prompts.load(Ordering::SeqCst), 1, "decrypt asks");
 
+    // Another key needs `dm`, which this pairing didn't ask for.
     let other = Keys::generate().public_key();
     let err = s
         .local_request(
@@ -414,7 +417,136 @@ async fn nip44_is_self_only_and_decrypt_asks() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err, "local apps only encrypt to their own account");
+    assert_eq!(
+        err,
+        "Peridot didn't ask to send private messages when it paired"
+    );
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        1,
+        "refused before any prompt"
+    );
+}
+
+#[tokio::test]
+async fn dm_encrypts_to_a_peer_but_never_decrypts_one() {
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let prompts = auto_answer(
+        e.prompts.clone(),
+        PromptAnswer {
+            allow: true,
+            remember: Remember::Once,
+        },
+    );
+    let mut p = pairing(&e, Policy::Basic, &[(Method::Nip44Encrypt, None)]);
+    p.dm = true;
+    let (info, token) = s.pair_local_app(p).await.unwrap();
+    assert!(info.dm);
+    let app = s.local_app_by_token(&token).unwrap();
+
+    // Encrypting to a peer: what a NIP-17 seal needs. The peer can open it.
+    let peer = Keys::generate();
+    let Outcome::Text(cipher) = s
+        .local_request(
+            &app,
+            Op::Cipher {
+                method: Method::Nip44Encrypt,
+                with: peer.public_key(),
+                text: "hello".into(),
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected text");
+    };
+    assert_eq!(
+        nip44::decrypt(peer.secret_key(), &e.account, &cipher).unwrap(),
+        "hello"
+    );
+    assert_eq!(prompts.load(Ordering::SeqCst), 0, "encrypt was granted");
+
+    // What the peer sent back stays closed to a local app, dm or not.
+    let reply =
+        nip44::encrypt(peer.secret_key(), &e.account, "hi back", nip44::Version::V2).unwrap();
+    let err = s
+        .local_request(
+            &app,
+            Op::Cipher {
+                method: Method::Nip44Decrypt,
+                with: peer.public_key(),
+                text: reply,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, "local apps only decrypt their own data");
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        0,
+        "refused before any prompt"
+    );
+
+    // Its own data still works as before.
+    let Outcome::Text(own) = s
+        .local_request(
+            &app,
+            Op::Cipher {
+                method: Method::Nip44Encrypt,
+                with: e.account,
+                text: "mine".into(),
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected text");
+    };
+    let Outcome::Text(plain) = s
+        .local_request(
+            &app,
+            Op::Cipher {
+                method: Method::Nip44Decrypt,
+                with: e.account,
+                text: own,
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected text");
+    };
+    assert_eq!(plain, "mine");
+    assert_eq!(
+        prompts.load(Ordering::SeqCst),
+        1,
+        "decrypting its own data asks"
+    );
+
+    // Re-pairing without `dm` takes it away again.
+    let (again, token) = s
+        .pair_local_app(pairing(&e, Policy::Basic, &[]))
+        .await
+        .unwrap();
+    assert_eq!(again.id, info.id);
+    assert!(!again.dm);
+    let app = s.local_app_by_token(&token).unwrap();
+    let err = s
+        .local_request(
+            &app,
+            Op::Cipher {
+                method: Method::Nip44Encrypt,
+                with: peer.public_key(),
+                text: "x".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "Peridot didn't ask to send private messages when it paired"
+    );
 }
 
 #[tokio::test]

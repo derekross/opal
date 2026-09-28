@@ -294,7 +294,7 @@ Column {
         if (a.kind === "local") {
           parts.push("A program on this computer")
           parts.push("program: " + (a.exe || a.unit || "unknown"))
-          parts.push("may ask for kinds " + (a.kinds || []).join(", ") + (a.nip44 ? " and its own encryption" : ""))
+          parts.push("may ask for kinds " + (a.kinds || []).join(", ") + (a.nip44 ? " and its own encryption" : "") + (a.dm ? " and private messages" : ""))
           return parts.join(" · ")
         }
         if (a.url) parts.push(a.url)
