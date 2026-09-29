@@ -8,6 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use nostr_sdk::prelude::*;
 use opal_core::config::Policy;
+use opal_core::text::no_invisible;
 use opal_core::vault::Vault;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
@@ -967,7 +968,7 @@ impl Inner {
 /// App names come from the app itself: keep them short, single-line, and
 /// unable to pass as command-line options.
 pub fn clean_label(s: &str) -> String {
-    let one_line: String = s
+    let one_line: String = no_invisible(s)
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
@@ -987,4 +988,19 @@ pub fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::fill(&mut buf[..]);
     hex::encode(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_label;
+
+    #[test]
+    fn app_names_lose_their_invisible_characters() {
+        // An app that names itself with a bidi override could make the
+        // approval dialog read as something other than what it is.
+        assert_eq!(clean_label("Peridot\u{202E}\u{200B}"), "Peridot");
+        assert_eq!(clean_label("--exec rm -rf"), "exec rm -rf");
+        assert_eq!(clean_label("a\nb\tc"), "a b c");
+        assert_eq!(clean_label(&"x".repeat(80)).chars().count(), 60);
+    }
 }
