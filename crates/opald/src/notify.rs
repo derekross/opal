@@ -5,12 +5,14 @@
 //!
 //! Everything shown comes partly from strangers (names, note text), so it is
 //! sanitized: no leading dashes (they'd be read as options), no markup, no
-//! control characters, limited length. Popups are rate-limited.
+//! control, invisible or reordering characters, limited length. Popups are
+//! rate-limited.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use opal_core::text::no_invisible;
 use opal_signer::Prompt;
 
 use crate::app::App;
@@ -112,9 +114,10 @@ async fn send(headline: &str, body: &str, click: Click, image: Option<&std::path
 }
 
 /// Make untrusted text safe to hand to a notification: one line, no control
-/// characters, no markup, can't start with '-', bounded length.
+/// characters, no invisible or reordering ones, no markup, can't start with
+/// '-', bounded length.
 pub fn clean(s: &str, max: usize) -> String {
-    let flat: String = s
+    let flat: String = no_invisible(s)
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
@@ -347,5 +350,15 @@ mod tests {
         );
         assert_eq!(clean("a\nb\tc", 80), "a b c");
         assert_eq!(clean("abcdef", 3), "abc…");
+        // `char::is_control()` covers C0 and C1 only, and these are not
+        // controls: a name or a message carrying one reads as something its
+        // author never wrote.
+        assert_eq!(clean("alice\u{202E}gnp.exe", 80), "alicegnp.exe");
+        assert_eq!(clean("sam\u{200B}\u{2066}\u{00AD}", 80), "sam");
+        assert_eq!(
+            clean("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", 80),
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "the emoji joiners are not controls"
+        );
     }
 }
