@@ -348,7 +348,18 @@ impl App {
             "has_accounts": !accounts.is_empty(),
             "accounts": accounts,
             "current_account": current.map(|c| c.to_hex()),
-            "identity": cfg.identity,
+            // The bar's job is to label the profile and show the counts. An
+            // external signer's `bunker://` link carries the secret that pairs
+            // it, so it stays behind the UI session token with the rest of the
+            // config: `config.get` is where the panel reads it back, after
+            // signing in. Everything in this snapshot is served without a
+            // token — the `status` method, the snapshot a `subscribe` gets,
+            // and every `state` event.
+            "identity": json!({
+                "mode": cfg.identity.mode,
+                "npub": cfg.identity.npub,
+                "nip05": cfg.identity.nip05,
+            }),
             "modules": cfg.modules,
             "pending_prompts": self.prompts.pending().len(),
             "unread_notifications": self.unread_notifications().await,
