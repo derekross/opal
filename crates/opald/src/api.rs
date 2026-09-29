@@ -1444,6 +1444,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_bar_gets_the_identity_without_the_bunker_link() {
+        let (app, _) = test_app().await;
+        let uri = "bunker://0ad0?relay=wss%3A%2F%2Frelay.example.com&secret=c0ffee";
+        app.config.write().await.identity.bunker_uri = Some(uri.to_string());
+
+        // Every unprivileged read: the `status` method, the snapshot a
+        // `subscribe` gets, and every `state` event.
+        let s = call(&app, &Peer::default(), "status", json!(null))
+            .await
+            .unwrap();
+        assert!(
+            s["identity"].get("bunker_uri").is_none(),
+            "the bunker link carries the secret that pairs it: {s}"
+        );
+        assert_eq!(
+            s["identity"]["mode"],
+            json!(app.config.read().await.identity.mode),
+            "the bar still labels the profile"
+        );
+
+        // And the panel can still read it back after signing in.
+        let c = call(&app, &ui(), "config.get", json!(null)).await.unwrap();
+        assert_eq!(c["identity"]["bunker_uri"], json!(uri));
+    }
+
+    #[tokio::test]
     async fn app_connect_accept_then_sign_and_status() {
         let (app, pk) = test_app().await;
         let mut events = app.events.subscribe();
