@@ -30,7 +30,8 @@ daemon, one gem icon, and modules you switch on as you need them:
 
 ### Notifications
 - Inbox with filters (all, replies, zaps, DMs), unread dot on the gem, context of the note being replied to or reacted to.
-- Desktop popups with avatars; clicking opens the note in your client of choice (Primal, Jumble, Coracle, noStrudel, Ditto, Nostrich, njump).
+- Desktop popups with avatars; clicking opens the note in your client of choice (Primal, Jumble, Coracle, noStrudel, Ditto, Nostrich, njump) or in your **default app** for Nostr links.
+- **Default app** opens notifications as `nostr:` / `web+nostr:` links in the app installed for them: native Nostr apps register `nostr:`, installed web apps like Ditto, Coracle and noStrudel register `web+nostr:`. Settings lists those apps; picking one makes it the desktop's default for Nostr links, so other programs use it too. Opal uses your pick, then the default for `nostr:`, then for `web+nostr:`, and opens njump when no app handles Nostr links.
 - Zaps are checked (the zap request must be signed and addressed to you, and the amount must match the invoice) before they're shown.
 - DMs are decrypted with your key while Opal is unlocked; ones that arrive while locked wait until you unlock. Message text stays out of popups and storage unless you turn previews on.
 

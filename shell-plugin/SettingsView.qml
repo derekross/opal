@@ -259,8 +259,52 @@ Column {
           selected: modelData.value === (parent.parent.n.client || "primal")
           bordered: true
           foreground: root.foreground
-          onClicked: root.set({ notifications: { client: modelData.value } })
+          // The panel's notification links depend on the client: reload them.
+          onClicked: root.svc.runGuarded("config.set", { notifications: { client: modelData.value } },
+            function(r) { root.svc.config = r; root.svc.refreshNotifications() })
         }
+      }
+    }
+    // "Default app": the installed apps that open Nostr links. Picking one
+    // makes it the desktop's default for them, not just Opal's.
+    Column {
+      readonly property var da: root.svc && root.svc.notifyStatus.default_app ? root.svc.notifyStatus.default_app : ({})
+      readonly property var apps: da.apps || []
+      width: parent.width - parent.leftPadding
+      spacing: Style.space(6)
+      visible: parent.n.client === "default"
+
+      Flow {
+        width: parent.width
+        spacing: Style.space(6)
+        visible: parent.apps.length > 0
+        Repeater {
+          model: parent.parent.apps
+          delegate: Button {
+            required property var modelData
+            text: modelData.name
+            selected: !!parent.parent.da.opens_in && parent.parent.da.opens_in.id === modelData.id
+            bordered: true
+            foreground: root.foreground
+            onClicked: root.svc.runGuarded("notifications.set_default_app", { id: modelData.id }, function(r) {
+              root.svc.config = r.config
+              root.svc.refreshNotifications()
+            })
+          }
+        }
+      }
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        wrapMode: Text.Wrap
+        color: root.dim
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        text: parent.apps.length === 0
+          ? "No app on this computer opens Nostr links, so notifications open in njump."
+          : parent.da.opens_in
+            ? "Notifications open in " + parent.da.opens_in.name + ". Other apps open Nostr links there too."
+            : "Pick the app that opens Nostr links. Until then, notifications open in njump."
       }
     }
     Toggle {

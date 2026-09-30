@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod handlers;
 mod ipc;
 mod modules;
 mod notify;

@@ -935,6 +935,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 "running": status.is_some(),
                 "status": status,
                 "unread": app.unread_notifications().await,
+                "default_app": default_app_status(app).await,
                 "clients": opal_notify::links::CLIENTS
                     .iter()
                     .map(|(id, label, _)| json!({"value": id, "label": label}))
@@ -951,14 +952,14 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             let Some(account) = notify_account(app).await else {
                 return Ok(json!([]));
             };
-            let client = app.config.read().await.notifications.client.clone();
+            let opener = notify_opener(app).await;
             let list = app
                 .notify_store
                 .list(&account, p.limit.unwrap_or(100), p.before)?;
             Ok(json!(
                 list.into_iter()
                     .map(|n| {
-                        let url = notification_url(&client, &n);
+                        let url = notification_url(opener, &n);
                         let mut v = serde_json::to_value(&n).unwrap_or_default();
                         v["url"] = json!(url);
                         v
@@ -982,6 +983,24 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             app.emit_state().await;
             Ok(json!({"ok": true}))
         }
+        "notifications.set_default_app" => {
+            // Changes the desktop's default app for Nostr links, so only from
+            // a signed-in connection (not in `open_method`), and only to an
+            // installed app that handles them.
+            let p: Id = parse(params)?;
+            let picked = crate::handlers::set_default(&p.id).await?;
+            let new = {
+                let mut guard = app.config.write().await;
+                let mut new = guard.clone();
+                new.notifications.default_app = picked.id;
+                new.notifications.client = opal_notify::links::DEFAULT_APP.into();
+                new.save_to(&app.config_path)?;
+                *guard = new.clone();
+                new
+            };
+            app.emit_state().await;
+            Ok(json!({"config": new, "default_app": default_app_status(app).await}))
+        }
         "notifications.open" => {
             let p: Id = parse(params)?;
             let account = notify_account(app)
@@ -991,8 +1010,8 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 .notify_store
                 .get(&account, &p.id)?
                 .ok_or(anyhow!("no such notification"))?;
-            let client = app.config.read().await.notifications.client.clone();
-            let url = notification_url(&client, &n).ok_or(anyhow!("nothing to open"))?;
+            let opener = notify_opener(app).await;
+            let url = notification_url(opener, &n).ok_or(anyhow!("nothing to open"))?;
             crate::notify::open_url(&url);
             Ok(json!({"url": url}))
         }
@@ -1137,22 +1156,42 @@ async fn notify_account(app: &App) -> Option<String> {
         .map(|(engine, _)| engine.account().to_hex())
 }
 
+/// How notification links start, for the current settings.
+async fn notify_opener(app: &App) -> opal_notify::links::Opener {
+    let cfg = app.config.read().await.notifications.clone();
+    crate::handlers::opener(&cfg).await
+}
+
+/// The installed Nostr apps and where "Default app" opens, for Settings.
+async fn default_app_status(app: &App) -> Value {
+    let picked = app.config.read().await.notifications.default_app.clone();
+    let snap = crate::handlers::snapshot(&picked).await;
+    json!({
+        "apps": snap.apps,
+        "picked": (!picked.is_empty()).then_some(picked),
+        "opens_in": snap.opens_in.map(|(scheme, a)| json!({"id": a.id, "name": a.name, "scheme": scheme})),
+    })
+}
+
 /// Where clicking a notification goes: the note itself for replies and
 /// mentions, the note it is about for reactions, reposts and zaps.
-fn notification_url(client: &str, n: &opal_notify::StoredNotification) -> Option<String> {
+fn notification_url(
+    opener: opal_notify::links::Opener,
+    n: &opal_notify::StoredNotification,
+) -> Option<String> {
     use opal_notify::NotifType;
     let n2 = &n.n;
     match (n2.ntype, &n2.ref_id) {
         (NotifType::Dm, _) => None,
-        (NotifType::Reply | NotifType::Mention, _) | (_, None) => opal_notify::links::event_url(
-            client,
+        (NotifType::Reply | NotifType::Mention, _) | (_, None) => opal_notify::links::event_link(
+            opener,
             &n2.id,
             Some(&n2.author),
             Some(n2.kind),
             n2.relay.as_deref(),
         ),
-        (_, Some(r)) => opal_notify::links::event_url(
-            client,
+        (_, Some(r)) => opal_notify::links::event_link(
+            opener,
             r,
             n.ref_author.as_deref(),
             n.ref_kind,
@@ -1817,6 +1856,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_app_must_be_an_installed_nostr_app() {
+        let (app, _) = test_app().await;
+        for id in ["not-installed-anywhere.desktop", "", "../../evil.desktop"] {
+            let err = call(
+                &app,
+                &ui(),
+                "notifications.set_default_app",
+                json!({"id": id}),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.to_string(), "that app doesn't open Nostr links", "{id}");
+        }
+        let cfg = app.config.read().await.notifications.clone();
+        assert!(cfg.default_app.is_empty());
+        assert_ne!(cfg.client, opal_notify::links::DEFAULT_APP);
+    }
+
+    #[tokio::test]
     async fn privileged_methods_need_the_ui_session() {
         let (app, pk) = test_app().await;
         let stranger = Peer::default();
@@ -1832,6 +1890,10 @@ mod tests {
             ("apps.list", json!(null)),
             ("activity.list", json!(null)),
             ("config.set", json!({})),
+            (
+                "notifications.set_default_app",
+                json!({"id": "chromium.desktop"}),
+            ),
         ] {
             let err = call(&app, &stranger, m, p).await.unwrap_err().to_string();
             assert_eq!(err, NEEDS_UI, "{m}");

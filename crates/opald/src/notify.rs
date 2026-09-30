@@ -51,10 +51,10 @@ enum Click {
     Url(String),
 }
 
-/// Open a web link in the user's session, outside opald's sandbox (a
-/// browser started from inside it would inherit its restrictions).
+/// Open a notification link in the user's session, outside opald's sandbox
+/// (a browser started from inside it would inherit its restrictions).
 pub fn open_url(url: &str) {
-    if !url.starts_with("https://") {
+    if !openable(url) {
         return;
     }
     let spawned = std::process::Command::new("systemd-run")
@@ -65,6 +65,24 @@ pub fn open_url(url: &str) {
             let _ = child.wait();
         });
     }
+}
+
+/// Links Opal hands to xdg-open: a web page, or a `nostr:` / `web+nostr:`
+/// link to a NIP-19 identifier for the default Nostr app. Nothing else, so
+/// a bad link can't make the desktop launch some other handler.
+fn openable(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    [crate::handlers::NOSTR, crate::handlers::WEB_NOSTR]
+        .iter()
+        .find_map(|scheme| url.strip_prefix(scheme)?.strip_prefix(':'))
+        .is_some_and(|body| {
+            !body.is_empty()
+                && body
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 async fn send(headline: &str, body: &str, click: Click, image: Option<&std::path::Path>) {
@@ -230,15 +248,15 @@ pub async fn nostr_popup(app: &Arc<App>, n: opal_notify::Notification) {
     let click = if n.ntype == NotifType::Dm {
         Click::Inbox
     } else {
-        match opal_notify::links::event_url(
-            &cfg.client,
+        match opal_notify::links::event_link(
+            crate::handlers::opener(&cfg).await,
             &target,
             author.as_deref(),
             kind,
             n.relay.as_deref(),
         ) {
-            Some(u) => Click::Url(u),
-            None => Click::Inbox,
+            Some(u) if openable(&u) => Click::Url(u),
+            _ => Click::Inbox,
         }
     };
     send(&headline, &body, click, avatar.as_deref()).await;
@@ -347,5 +365,25 @@ mod tests {
         );
         assert_eq!(clean("a\nb\tc", 80), "a b c");
         assert_eq!(clean("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn opens_only_web_and_nostr_links() {
+        assert!(openable("https://njump.me/nevent1abc"));
+        assert!(openable("nostr:nevent1qqs0abc"));
+        assert!(openable("web+nostr:nevent1qqs0abc"));
+        for bad in [
+            "http://example.com",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "nostr:",
+            "nostr:nevent1 --flag",
+            "nostr:NEVENT1ABC",
+            "web+nostr:nevent1abc/../x",
+            "nostrconnect://x",
+            "--help",
+        ] {
+            assert!(!openable(bad), "{bad}");
+        }
     }
 }

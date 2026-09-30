@@ -158,8 +158,13 @@ impl Default for NotificationTypes {
 #[serde(default)]
 pub struct NotificationsConfig {
     pub types: NotificationTypes,
-    /// Web client that opens a notification: primal, jumble, coracle, nostrudel, ditto, nostrich, njump.
+    /// Where clicking a notification opens it: "default" (the desktop's
+    /// default Nostr app, see `default_app`) or a web client: primal,
+    /// jumble, coracle, nostrudel, ditto, nostrich, njump.
     pub client: String,
+    /// Desktop id (e.g. `chrome-<id>-Default.desktop`) of the Nostr app
+    /// picked in Settings for "default"; empty until one is picked.
+    pub default_app: String,
     /// Pop desktop notifications for new events (the panel always lists them).
     pub desktop: bool,
     /// Show message text in desktop notifications for DMs.
@@ -177,6 +182,7 @@ impl Default for NotificationsConfig {
         Self {
             types: NotificationTypes::default(),
             client: "primal".into(),
+            default_app: String::new(),
             desktop: true,
             dm_previews: false,
             min_zap_sats: 0,
