@@ -30,7 +30,7 @@ daemon, one gem icon, and modules you switch on as you need them:
 
 ### Notifications
 - Inbox with filters (all, replies, zaps, DMs), unread dot on the gem, context of the note being replied to or reacted to.
-- Desktop popups with avatars; clicking opens the note in your client of choice (Primal, Jumble, Coracle, Ditto, njump).
+- Desktop popups with avatars; clicking opens the note in your client of choice (Primal, Jumble, Coracle, noStrudel, Ditto, Nostrich, njump).
 - Zaps are checked (the zap request must be signed and addressed to you, and the amount must match the invoice) before they're shown.
 - DMs are decrypted with your key while Opal is unlocked; ones that arrive while locked wait until you unlock. Message text stays out of popups and storage unless you turn previews on.
 

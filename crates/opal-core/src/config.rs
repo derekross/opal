@@ -158,7 +158,7 @@ impl Default for NotificationTypes {
 #[serde(default)]
 pub struct NotificationsConfig {
     pub types: NotificationTypes,
-    /// Web client that opens a notification: primal, jumble, coracle, nostrudel, ditto.
+    /// Web client that opens a notification: primal, jumble, coracle, nostrudel, ditto, nostrich, njump.
     pub client: String,
     /// Pop desktop notifications for new events (the panel always lists them).
     pub desktop: bool,

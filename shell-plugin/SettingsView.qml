@@ -246,12 +246,22 @@ Column {
       }
     }
     PanelSectionHeader { text: "OPEN IN"; foreground: root.dim }
-    ButtonGroup {
+    // A Flow, not a ButtonGroup: a ButtonGroup is one Row and the client
+    // list is longer than the panel is wide.
+    Flow {
       width: parent.width - parent.leftPadding
-      options: root.svc && root.svc.notifyStatus.clients ? root.svc.notifyStatus.clients : []
-      value: parent.n.client || "primal"
-      foreground: root.foreground
-      onChanged: function(v) { root.set({ notifications: { client: v } }) }
+      spacing: Style.space(6)
+      Repeater {
+        model: root.svc && root.svc.notifyStatus.clients ? root.svc.notifyStatus.clients : []
+        delegate: Button {
+          required property var modelData
+          text: modelData.label
+          selected: modelData.value === (parent.parent.n.client || "primal")
+          bordered: true
+          foreground: root.foreground
+          onClicked: root.set({ notifications: { client: modelData.value } })
+        }
+      }
     }
     Toggle {
       width: parent.width - parent.leftPadding

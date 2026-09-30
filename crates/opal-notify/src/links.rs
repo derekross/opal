@@ -7,7 +7,9 @@ pub const CLIENTS: &[(&str, &str, &str)] = &[
     ("primal", "Primal", "https://primal.net/e/"),
     ("jumble", "Jumble", "https://jumble.social/notes/"),
     ("coracle", "Coracle", "https://coracle.social/notes/"),
+    ("nostrudel", "noStrudel", "https://nostrudel.ninja/#/n/"),
     ("ditto", "Ditto", "https://ditto.pub/"),
+    ("nostrich", "Nostrich", "https://nostrich.org/e/"),
     ("njump", "njump", "https://njump.me/"),
 ];
 
