@@ -10,6 +10,7 @@ pub mod import;
 pub mod ipc;
 pub mod keystore;
 pub mod paths;
+pub mod text;
 pub mod vault;
 
 pub use error::{Error, Result};

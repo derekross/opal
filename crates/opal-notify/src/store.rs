@@ -4,6 +4,7 @@
 use opal_core::Result;
 use opal_core::accounts::Profile;
 use opal_core::db::Db;
+use opal_core::text::no_invisible;
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
@@ -151,7 +152,7 @@ impl NotifyStore {
                         kind: r.get(2)?,
                         author: r.get(3)?,
                         created_at,
-                        detail: r.get(5)?,
+                        detail: no_invisible(&r.get::<_, String>(5)?),
                         ref_id: r.get(6)?,
                         sats: r.get::<_, Option<i64>>(7)?.map(|s| s as u64),
                         media: r.get(8)?,
@@ -163,9 +164,13 @@ impl NotifyStore {
                     } else {
                         created_at > last_read
                     },
-                    author_name: r.get(11)?,
+                    // A profile name and a note's text are someone else's
+                    // bytes: the panel shows them as plain text, which stops
+                    // markup but not a bidi override, so the invisible
+                    // characters come out here rather than at every reader.
+                    author_name: r.get::<_, Option<String>>(11)?.map(|s| no_invisible(&s)),
                     author_picture: r.get(12)?,
-                    context: r.get(13)?,
+                    context: r.get::<_, Option<String>>(13)?.map(|s| no_invisible(&s)),
                     ref_author: r.get(14)?,
                     ref_kind: r.get(15)?,
                 })
@@ -440,6 +445,32 @@ mod tests {
         s.insert("me", &n("dm", NotifType::Dm, 10), 500).unwrap();
         s.mark_read("me", 400).unwrap();
         assert_eq!(s.unread_count("me").unwrap(), 1);
+    }
+
+    #[test]
+    fn list_takes_the_invisible_characters_out() {
+        let s = NotifyStore::new(Db::open_in_memory().unwrap()).unwrap();
+        // The reply text, the name shown for it, and the text of the note the
+        // row is about are all someone else's bytes on their way to the panel.
+        let mut reply = n("2", NotifType::Reply, 200);
+        reply.detail = "hi\u{202E}there".into();
+        s.insert("me", &reply, 200).unwrap();
+        s.put_ref_event(&"r".repeat(64), &"b".repeat(64), 1, "my\u{2066}\u{200B} note")
+            .unwrap();
+        s.put_profile(
+            &"a".repeat(64),
+            &Profile {
+                display_name: Some("ali\u{200F}ce\u{00AD}".into()),
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+        let list = s.list("me", 10, None).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].n.detail, "hithere");
+        assert_eq!(list[0].author_name.as_deref(), Some("alice"));
+        assert_eq!(list[0].context.as_deref(), Some("my note"));
     }
 
     #[test]
