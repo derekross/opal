@@ -112,7 +112,16 @@ pub struct NotifyEngine {
 
 impl NotifyEngine {
     pub fn start(params: NotifyParams) -> Self {
-        let client = new_client(None);
+        // With the key here, AUTH for inbox relays that require it.
+        let client = match &params.vault {
+            Some(vault) => client_builder()
+                .authenticator(SignerAuthenticator::new(VaultAuth {
+                    vault: vault.clone(),
+                    me: params.account,
+                }))
+                .build(),
+            None => client_builder().build(),
+        };
         let (events, _) = broadcast::channel(256);
         let status = Arc::new(RwLock::new(NotifyStatus {
             account: params.account.to_hex(),
@@ -134,6 +143,7 @@ impl NotifyEngine {
             started: Timestamp::now().as_secs(),
             mute_event: None,
             private_mutes: None,
+            dm_relays: Vec::new(),
         };
         let task = tokio::spawn(run.run(commands_rx));
         Self {
@@ -232,6 +242,8 @@ struct Runner {
     mute_event: Option<Event>,
     /// In list order (oldest first), as the list's author added them.
     private_mutes: Option<(EventId, Vec<String>)>,
+    /// Where DMs are read, to reconnect them once AUTH can be answered.
+    dm_relays: Vec<RelayUrl>,
 }
 
 /// The user's relay lists and mutes.
@@ -280,6 +292,9 @@ impl Runner {
         self.client.connect().and_wait(CONNECT_WAIT).await;
 
         let dms = self.cfg.types.dms && self.vault.is_some();
+        if dms {
+            self.dm_relays = dm.clone();
+        }
         {
             let mut st = self.status.write().await;
             st.read_relays = read.iter().map(|r| r.to_string()).collect();
@@ -336,6 +351,7 @@ impl Runner {
                         }
                         if dms {
                             self.process_pending_wraps(&want_tx).await;
+                            self.reauth_dm_relays().await;
                         }
                     }
                 }
@@ -574,7 +590,9 @@ impl Runner {
         let keys = self.keys().await.ok_or(MUTE_NEEDS_UNLOCK)?;
         // Its own client: answers are judged per relay, and waiting for a
         // connection means only the relays asked.
-        let edit = new_client(Some(keys.clone()));
+        let edit = client_builder()
+            .authenticator(SignerAuthenticator::new(keys.clone()))
+            .build();
         let r = self.edit_mutes(&edit, &keys, target, mute, bootstrap).await;
         edit.shutdown().await;
         let ev = r?;
@@ -712,6 +730,18 @@ impl Runner {
             }
         }
         out
+    }
+
+    /// An AUTH challenge that came while Opal was locked went unanswered,
+    /// and relays send one per connection: reconnect, which also
+    /// resubscribes once AUTH succeeds.
+    async fn reauth_dm_relays(&self) {
+        for url in &self.dm_relays {
+            if let Ok(Some(relay)) = self.client.relay(url).await {
+                relay.disconnect();
+                let _ = relay.try_connect().timeout(CONNECT_WAIT).await;
+            }
+        }
     }
 
     async fn keys(&self) -> Option<Keys> {
@@ -927,18 +957,68 @@ impl Runner {
 ///
 /// With `keys`, it answers NIP-42 AUTH: outbox relays such as Haven only
 /// take your lists from you, and some relays only serve them to you.
-fn new_client(keys: Option<Keys>) -> Client {
+fn client_builder() -> ClientBuilder {
     let mut limits = RelayLimits::default();
     limits.events = limits
         .events
         .set_max_num_tags_per_kind(Kind::MuteList, None)
         .set_max_num_tags_per_kind(Kind::RelayList, None);
-    let builder = Client::builder().relay_limits(limits);
-    match keys {
-        Some(keys) => builder
-            .authenticator(SignerAuthenticator::new(keys))
-            .build(),
-        None => builder.build(),
+    Client::builder().relay_limits(limits)
+}
+
+/// Answers NIP-42 AUTH with the account key while Opal is unlocked, so
+/// inbox relays that only hand DMs to their owner (Haven's chat relay)
+/// serve them. It signs nothing but AUTH events.
+struct VaultAuth {
+    vault: Arc<Vault>,
+    me: PublicKey,
+}
+
+impl std::fmt::Debug for VaultAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultAuth").field("me", &self.me).finish()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum VaultAuthError {
+    #[error("Opal is locked")]
+    Locked,
+    #[error("only AUTH events are signed here")]
+    NotAuth,
+    #[error(transparent)]
+    Sign(#[from] opal_core::nostr::error::Error),
+}
+
+impl AsyncGetPublicKey for VaultAuth {
+    type Error = VaultAuthError;
+    fn get_public_key_async(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<PublicKey, Self::Error>> + Send + '_>,
+    > {
+        Box::pin(async move { Ok(self.me) })
+    }
+}
+
+impl AsyncSignEvent for VaultAuth {
+    type Error = VaultAuthError;
+    fn sign_event_async(
+        &self,
+        unsigned: UnsignedEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Event, Self::Error>> + Send + '_>>
+    {
+        Box::pin(async move {
+            if unsigned.kind != Kind::Authentication || unsigned.pubkey != self.me {
+                return Err(VaultAuthError::NotAuth);
+            }
+            let keys = self
+                .vault
+                .keys(&self.me)
+                .await
+                .map_err(|_| VaultAuthError::Locked)?;
+            Ok(keys.sign_event(unsigned)?)
+        })
     }
 }
 

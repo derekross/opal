@@ -840,3 +840,53 @@ async fn muting_works_on_relays_that_require_auth() {
     assert!(private.contains(&vec!["p".to_string(), target.to_hex()]));
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn dms_on_inbox_relays_that_require_auth_arrive_after_unlock() {
+    // Like Haven's chat relay: AUTH for everything, gift wraps only to
+    // their recipient.
+    let relay = LocalRelayBuilder::default()
+        .nip42(LocalRelayBuilderNip42::read_and_write())
+        .auth_dm(true)
+        .build();
+    relay.run().await.unwrap();
+    let url = relay.url().await;
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let alice = Keys::generate();
+
+    // Opal starts locked.
+    let vault = Arc::new(Vault::with_log_n(SecretStore::memory(), 4));
+    vault.add_account(me_keys.clone(), "pw").await.unwrap();
+    let store = NotifyStore::new(Db::open_in_memory().unwrap()).unwrap();
+    let engine = NotifyEngine::start(NotifyParams {
+        account: me,
+        config: NotificationsConfig {
+            bootstrap_relays: vec![url.to_string()],
+            ..Default::default()
+        },
+        store: store.clone(),
+        vault: Some(vault.clone()),
+    });
+    let mut events = engine.subscribe();
+    while !matches!(events.recv().await, Ok(NotifyEvent::Status { .. })) {}
+
+    let sender = Client::builder()
+        .authenticator(SignerAuthenticator::new(alice.clone()))
+        .build();
+    sender.add_relay(&url).await.unwrap();
+    sender.connect().and_wait(Duration::from_secs(3)).await;
+    let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "behind auth")
+        .tag(Tag::public_key(me))
+        .finalize_unsigned(alice.public_key());
+    let wrap = GiftWrapBuilder::new(me, rumor).finalize(&alice).unwrap();
+    publish(&sender, wrap).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(store.list(&me.to_hex(), 100, None).unwrap().is_empty());
+
+    vault.unlock("pw").await.unwrap();
+    let list = wait_for(&store, &me.to_hex(), 1).await;
+    assert_eq!(list.len(), 1, "the DM arrives once Opal can AUTH");
+    assert_eq!(list[0].n.ntype, NotifType::Dm);
+    engine.stop().await;
+}

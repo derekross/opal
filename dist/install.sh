@@ -287,3 +287,8 @@ say
 { systemctl --user --no-pager --lines=0 status opal.service 2>/dev/null | head -3; } || true
 say
 say "Done. Click the Opal gem in the bar to add a key or watch someone."
+# The shell reloads a changed plugin but can keep the panel's old files in
+# its component cache; a restart loads the new ones.
+if (( PLUGIN_TOUCHED && ! PLUGIN_CREATED )); then
+  note "If the Opal panel doesn't show what's new, restart the shell: omarchy-restart-shell"
+fi
