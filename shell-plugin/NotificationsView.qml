@@ -62,7 +62,7 @@ Column {
     return ""
   }
   function name(n) {
-    return n.author_name || U.shortKey(n.author)
+    return n.author_name || U.shortKey(n.author_npub || n.author)
   }
 
   // Seeing the list counts as reading it.

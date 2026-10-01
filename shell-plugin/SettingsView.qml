@@ -342,7 +342,7 @@ Column {
         model: mutedList.showAll ? mutedList.all : mutedList.all.slice(0, 5)
         delegate: Item {
           required property var modelData
-          readonly property string label: modelData.name || U.shortKey(modelData.pubkey)
+          readonly property string label: modelData.name || U.shortKey(modelData.npub || modelData.pubkey)
           width: mutedList.width
           implicitHeight: Style.space(34)
 

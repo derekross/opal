@@ -373,6 +373,11 @@ async fn muting_from_opal_keeps_the_rest_of_the_list() {
     );
     assert!(store.list(&me.to_hex(), 100, None).unwrap().is_empty());
     let mutes = handle.mutes().await;
+    assert_eq!(
+        mutes[0].pubkey,
+        target.public_key().to_hex(),
+        "newest first: {mutes:?}"
+    );
     assert!(
         mutes
             .iter()

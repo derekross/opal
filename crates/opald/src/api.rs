@@ -962,6 +962,12 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                         let url = notification_url(opener, &n);
                         let mut v = serde_json::to_value(&n).unwrap_or_default();
                         v["url"] = json!(url);
+                        // For people without a name: an npub, not hex.
+                        v["author_npub"] = json!(
+                            PublicKey::from_hex(&n.n.author)
+                                .ok()
+                                .and_then(|pk| pk.to_bech32().ok())
+                        );
                         v
                     })
                     .collect::<Vec<_>>()
@@ -1134,8 +1140,9 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                     out.push((e.pubkey, if e.private { "private" } else { "public" }));
                 }
             }
-            for b in app.config.read().await.notifications.blocked.clone() {
-                if let Ok(pk) = PublicKey::parse(&b) {
+            // Opal's own list grows at the end too: newest first.
+            for b in app.config.read().await.notifications.blocked.iter().rev() {
+                if let Ok(pk) = PublicKey::parse(b) {
                     let hex = pk.to_hex();
                     if !out.iter().any(|(p, _)| *p == hex) {
                         out.push((hex, "opal"));
@@ -1149,7 +1156,10 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                         let (name, picture) = profile
                             .map(|(p, _)| (p.display_name.or(p.name), p.picture))
                             .unwrap_or_default();
-                        json!({"pubkey": pubkey, "list": list, "name": name, "picture": picture})
+                        let npub = PublicKey::from_hex(&pubkey)
+                            .ok()
+                            .and_then(|pk| pk.to_bech32().ok());
+                        json!({"pubkey": pubkey, "npub": npub, "list": list, "name": name, "picture": picture})
                     })
                     .collect::<Vec<_>>()
             ))

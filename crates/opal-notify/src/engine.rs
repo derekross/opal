@@ -230,7 +230,8 @@ struct Runner {
     /// The mute list in effect (newest seen) and its private entries, kept
     /// so a failed fetch or a locked vault doesn't un-mute anyone.
     mute_event: Option<Event>,
-    private_mutes: Option<(EventId, HashSet<String>)>,
+    /// In list order (oldest first), as the list's author added them.
+    private_mutes: Option<(EventId, Vec<String>)>,
 }
 
 /// The user's relay lists and mutes.
@@ -487,7 +488,7 @@ impl Runner {
                     .as_ref()
                     .is_none_or(|(id, _)| *id != ev.id)
                 {
-                    self.private_mutes = Some((ev.id, HashSet::new()));
+                    self.private_mutes = Some((ev.id, Vec::new()));
                     self.save_mute_cache().await;
                 }
             } else {
@@ -500,9 +501,9 @@ impl Runner {
                     Some(set) => Some(set),
                     None => match self.keys().await {
                         Some(keys) => {
-                            let set: Option<HashSet<String>> =
+                            let set: Option<Vec<String>> =
                                 decrypt_private(&keys, &self.me, &ev.content)
-                                    .map(|tags| p_tags(tags.into_iter()).into_iter().collect());
+                                    .map(|tags| p_tags(tags.into_iter()));
                             if let Some(set) = &set {
                                 self.private_mutes = Some((ev.id, set.clone()));
                                 self.save_mute_cache().await;
@@ -535,8 +536,8 @@ impl Runner {
         if let Ok(c) = serde_json::from_str::<MuteCache>(&json)
             && let Ok(id) = EventId::from_hex(&c.event)
         {
-            let set = p_tags(c.pubkeys.into_iter().map(|pk| vec!["p".into(), pk]));
-            self.private_mutes = Some((id, set.into_iter().collect()));
+            let list = p_tags(c.pubkeys.into_iter().map(|pk| vec!["p".into(), pk]));
+            self.private_mutes = Some((id, list));
         }
     }
 
@@ -544,8 +545,7 @@ impl Runner {
         let (Some(vault), Some((id, set))) = (&self.vault, &self.private_mutes) else {
             return;
         };
-        let mut pubkeys: Vec<String> = set.iter().cloned().collect();
-        pubkeys.sort();
+        let pubkeys = set.clone();
         let cache = MuteCache {
             event: id.to_hex(),
             pubkeys,
@@ -687,25 +687,28 @@ impl Runner {
         let Some(ev) = &self.mute_event else {
             return vec![];
         };
-        let mut out: Vec<MutedEntry> = p_tags(ev.tags.iter().map(|t| t.as_slice().to_vec()))
-            .into_iter()
-            .map(|pubkey| MutedEntry {
-                pubkey,
-                private: false,
-            })
-            .collect();
-        // Only the private entries in effect: the decrypted set may be from
-        // an older list when the newest one can't be read.
-        if let Some((_, set)) = &self.private_mutes {
-            let mut private: Vec<&String> = set.intersection(&self.muted).collect();
-            private.sort();
-            for pk in private {
-                if !out.iter().any(|e| &e.pubkey == pk) {
+        // Newest first: lists grow at the end, and Opal adds privately.
+        let public = p_tags(ev.tags.iter().map(|t| t.as_slice().to_vec()));
+        let mut out: Vec<MutedEntry> = Vec::new();
+        let mut seen: HashSet<&String> = HashSet::new();
+        // Only the private entries in effect: the decrypted list may be from
+        // an older version when the newest one can't be read.
+        if let Some((_, list)) = &self.private_mutes {
+            for pk in list.iter().rev() {
+                if self.muted.contains(pk) && !public.contains(pk) && seen.insert(pk) {
                     out.push(MutedEntry {
                         pubkey: pk.clone(),
                         private: true,
                     });
                 }
+            }
+        }
+        for pk in public.iter().rev() {
+            if seen.insert(pk) {
+                out.push(MutedEntry {
+                    pubkey: pk.clone(),
+                    private: false,
+                });
             }
         }
         out
