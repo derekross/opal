@@ -173,3 +173,101 @@ async fn notifications_end_to_end() {
     assert_eq!(store.unread_count(&me.to_hex()).unwrap(), 3);
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn private_mutes_survive_a_restart_while_locked() {
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await;
+    let publisher = Client::default();
+    publisher.add_relay(&url).await.unwrap();
+    publisher.connect().and_wait(Duration::from_secs(3)).await;
+
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let muted = Keys::generate();
+    let alice = Keys::generate();
+
+    // Only private entries, like most clients write them.
+    let private =
+        serde_json::to_string(&vec![vec!["p".to_string(), muted.public_key().to_hex()]]).unwrap();
+    let private = nip44::encrypt(me_keys.secret_key(), &me, private, nip44::Version::V2).unwrap();
+    publish(
+        &publisher,
+        EventBuilder::new(Kind::MuteList, private)
+            .finalize(&me_keys)
+            .unwrap(),
+    )
+    .await;
+
+    let vault = Arc::new(Vault::with_log_n(SecretStore::memory(), 4));
+    vault.add_account(me_keys.clone(), "pw").await.unwrap();
+    let cfg = NotificationsConfig {
+        bootstrap_relays: vec![url.to_string()],
+        ..Default::default()
+    };
+    let start = |store: &NotifyStore| {
+        NotifyEngine::start(NotifyParams {
+            account: me,
+            config: cfg.clone(),
+            store: store.clone(),
+            vault: Some(vault.clone()),
+        })
+    };
+    async fn muted_count(engine: &NotifyEngine) -> usize {
+        let mut events = engine.subscribe();
+        loop {
+            if let Ok(NotifyEvent::Status { status }) = events.recv().await {
+                return status.muted;
+            }
+        }
+    }
+
+    // Locked and never decrypted: nothing to go on yet.
+    let store = NotifyStore::new(Db::open_in_memory().unwrap()).unwrap();
+    let engine = start(&store);
+    assert_eq!(muted_count(&engine).await, 0);
+    engine.stop().await;
+
+    // Unlocked once: decrypted and cached.
+    vault.unlock("pw").await.unwrap();
+    let engine = start(&store);
+    assert_eq!(muted_count(&engine).await, 1);
+    engine.stop().await;
+
+    // Restarted while locked: the cache still applies.
+    vault.lock().await;
+    let engine = start(&store);
+    assert_eq!(muted_count(&engine).await, 1, "cached private mutes apply");
+    publish(
+        &publisher,
+        tagged(&muted, Kind::TextNote, "spam", &me, vec![]),
+    )
+    .await;
+    publish(
+        &publisher,
+        tagged(&alice, Kind::TextNote, "hi", &me, vec![]),
+    )
+    .await;
+    let list = wait_for(&store, &me.to_hex(), 1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let list = if list.is_empty() {
+        list
+    } else {
+        store.list(&me.to_hex(), 100, None).unwrap()
+    };
+    assert_eq!(list.len(), 1, "only alice gets through");
+    assert_eq!(list[0].n.author, alice.public_key().to_hex());
+    engine.stop().await;
+
+    // Removing the account drops its cache.
+    vault.unlock("pw").await.unwrap();
+    vault.remove_account(&me).await.unwrap();
+    assert!(
+        vault
+            .store()
+            .get(opal_core::keystore::ItemKind::MuteCache, &me.to_hex())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

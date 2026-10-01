@@ -1,6 +1,9 @@
 //! The live part: finds your relays (NIP-65), your mute list (NIP-51, private
 //! entries too when unlocked), subscribes to events that tag you, stores them
 //! as notifications and fills in profiles and the notes they refer to.
+//!
+//! Decrypted private mutes are cached in the login keyring, so they apply
+//! after a restart even while Opal is locked.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -10,8 +13,9 @@ use futures::StreamExt;
 use nostr_sdk::prelude::*;
 use opal_core::accounts::Profile;
 use opal_core::config::NotificationsConfig;
+use opal_core::keystore::ItemKind;
 use opal_core::vault::Vault;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
 
@@ -177,6 +181,7 @@ impl Runner {
         } else {
             lists.dm.clone()
         };
+        self.load_mute_cache().await;
         self.apply_mutes(lists.mute_event.as_ref()).await;
         for r in read.iter().chain(dm.iter()) {
             let _ = self.client.add_relay(r).await;
@@ -380,6 +385,7 @@ impl Runner {
                                 .map(|tags| p_tags(tags.into_iter()).into_iter().collect());
                             if let Some(set) = &set {
                                 self.private_mutes = Some((ev.id, set.clone()));
+                                self.save_mute_cache().await;
                             }
                             set
                         }
@@ -398,6 +404,43 @@ impl Runner {
         }
         self.muted = muted;
         self.status.write().await.muted = self.muted.len();
+    }
+
+    /// The private mutes decrypted before the last restart.
+    async fn load_mute_cache(&mut self) {
+        let Some(vault) = &self.vault else { return };
+        let Ok(Some(json)) = vault.store().get(ItemKind::MuteCache, &self.me_hex).await else {
+            return;
+        };
+        if let Ok(c) = serde_json::from_str::<MuteCache>(&json)
+            && let Ok(id) = EventId::from_hex(&c.event)
+        {
+            let set = p_tags(c.pubkeys.into_iter().map(|pk| vec!["p".into(), pk]));
+            self.private_mutes = Some((id, set.into_iter().collect()));
+        }
+    }
+
+    async fn save_mute_cache(&self) {
+        let (Some(vault), Some((id, set))) = (&self.vault, &self.private_mutes) else {
+            return;
+        };
+        let mut pubkeys: Vec<String> = set.iter().cloned().collect();
+        pubkeys.sort();
+        let cache = MuteCache {
+            event: id.to_hex(),
+            pubkeys,
+        };
+        let Ok(json) = serde_json::to_string(&cache) else {
+            return;
+        };
+        let label = format!("Opal private mutes ({})", &self.me_hex[..8]);
+        if let Err(e) = vault
+            .store()
+            .put(ItemKind::MuteCache, &self.me_hex, &label, &json)
+            .await
+        {
+            tracing::warn!("couldn't cache private mutes: {e}");
+        }
     }
 
     async fn keys(&self) -> Option<Keys> {
@@ -605,6 +648,14 @@ impl Runner {
             }
         }
     }
+}
+
+/// What the keyring holds for [`ItemKind::MuteCache`].
+#[derive(Serialize, Deserialize)]
+struct MuteCache {
+    /// The mute list event the entries were decrypted from.
+    event: String,
+    pubkeys: Vec<String>,
 }
 
 fn p_tags(tags: impl Iterator<Item = Vec<String>>) -> Vec<String> {

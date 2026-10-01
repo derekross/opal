@@ -3,7 +3,9 @@
 //! Opal account keys are only ever written here as NIP-49 `ncryptsec`
 //! strings, so a copied keyring file is useless without the Opal passphrase.
 //! Peridot's device identity is the exception: it is meant to work without a
-//! passphrase, so it is only as safe as the login keyring itself.
+//! passphrase, so it is only as safe as the login keyring itself. So is the
+//! notification engine's copy of your private mutes, kept so they apply
+//! while Opal is locked.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -27,6 +29,8 @@ pub enum ItemKind {
     SyncSecret,
     /// A local app's pairing token for opald (Peridot), secret = hex.
     AppToken,
+    /// An account's decrypted private mutes, secret = JSON (see opal-notify).
+    MuteCache,
 }
 
 impl ItemKind {
@@ -38,6 +42,7 @@ impl ItemKind {
             Self::DeviceIdentity => "device-identity",
             Self::SyncSecret => "sync-secret",
             Self::AppToken => "app-token",
+            Self::MuteCache => "mute-cache",
         }
     }
 }

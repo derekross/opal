@@ -259,6 +259,11 @@ impl Vault {
         self.store
             .delete(ItemKind::Account, &account.to_hex())
             .await?;
+        // Its private mutes go with it.
+        let _ = self
+            .store
+            .delete(ItemKind::MuteCache, &account.to_hex())
+            .await;
         if let Some(map) = self.keys.write().await.as_mut() {
             map.remove(account);
         }

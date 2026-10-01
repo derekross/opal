@@ -132,7 +132,7 @@ if (( PURGE )); then
   say "Deleting keys, settings and history"
   # Only Opal's own item kinds, never everything tagged application=opal.
   before="$(secret-tool search --all application opal 2>/dev/null | grep -c '^\[' || true)"
-  for kind in account conn-key client-key; do
+  for kind in account conn-key client-key mute-cache; do
     secret-tool clear application opal kind "$kind" 2>/dev/null || note "keyring: clearing '$kind' items failed; they may still be there."
   done
   after="$(secret-tool search --all application opal 2>/dev/null | grep -c '^\[' || true)"
