@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use nostr_sdk::prelude::PublicKey;
-use opal_core::config::IdentityMode;
+use opal_core::config::{IdentityMode, NotificationsConfig};
 use opal_notify::{NotifyEngine, NotifyEvent, NotifyParams};
 use opal_status::{StatusEngine, StatusEvent, StatusParams, StatusSigner};
 use serde_json::json;
@@ -75,12 +75,18 @@ async fn reconcile_notify(app: &Arc<App>) {
     } else {
         None
     };
+    // The block list is handed to the running engine instead: restarting
+    // would drop mutes it is in the middle of saving.
+    let keyed = NotificationsConfig {
+        blocked: vec![],
+        ..ncfg.clone()
+    };
     let wanted = identity.map(|(pk, local)| {
         let key = format!(
             "{}|{}|{}",
             pk.to_hex(),
             local,
-            serde_json::to_string(&ncfg).unwrap_or_default()
+            serde_json::to_string(&keyed).unwrap_or_default()
         );
         (pk, local, key)
     });
@@ -88,6 +94,9 @@ async fn reconcile_notify(app: &Arc<App>) {
     let mut slot = app.notify.lock().await;
     let current_key = slot.as_ref().map(|(_, k)| k.clone());
     if current_key.as_deref() == wanted.as_ref().map(|w| w.2.as_str()) {
+        if let Some((engine, _)) = slot.as_ref() {
+            engine.handle().set_blocked(ncfg.blocked.clone());
+        }
         return;
     }
     if let Some((engine, _)) = slot.take() {

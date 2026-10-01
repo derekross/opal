@@ -17,5 +17,7 @@ tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
 
 [dev-dependencies]
+futures = "0.3.34"
+tokio-tungstenite = "0.28.0"
 nostr-sdk = { version = "0.45", features = ["local-relay"] }
 tokio = { version = "1.53.1", features = ["full"] }

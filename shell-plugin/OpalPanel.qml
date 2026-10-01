@@ -282,6 +282,7 @@ Item {
               width: parent.width - guardOk.width - guardCancel.width - 2 * parent.spacing
               password: true
               placeholderText: "Opal passphrase"
+              enabled: !(root.up && root.svc.guardBusy)
               foreground: root.foreground
               onAccepted: { root.svc.confirmGuarded(text); text = "" }
               Keys.onEscapePressed: root.svc.cancelGuarded()
@@ -289,7 +290,8 @@ Item {
             Button {
               id: guardOk
               anchors.verticalCenter: guardField.verticalCenter
-              text: "Confirm"
+              text: root.up && root.svc.guardBusy ? "Saving…" : "Confirm"
+              enabled: !(root.up && root.svc.guardBusy)
               bordered: true
               foreground: root.foreground
               onClicked: { root.svc.confirmGuarded(guardField.text); guardField.text = "" }

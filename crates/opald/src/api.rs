@@ -1052,16 +1052,18 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 .iter()
                 .any(|b| PublicKey::parse(b).is_ok_and(|pk| pk == target));
 
-            // Your Nostr mute list, when the key is here. Unmuting always
-            // asks it (it reads the current list), unless the person is
-            // only on Opal's own list.
+            // Your Nostr mute list, when the engine has the key. Unmuting
+            // always asks it (it reads the current list), unless the person
+            // is only on Opal's own list.
             let mut list = "opal";
-            let mut why = if handle.as_ref().is_some_and(|(_, local)| *local) {
-                None
-            } else {
-                Some("there's no key here to change your Nostr mute list")
+            let mut why: Option<String> = match &handle {
+                None => Some("notifications are off".into()),
+                Some(h) if !h.has_key() => {
+                    Some("there's no key here to change your Nostr mute list".into())
+                }
+                Some(_) => None,
             };
-            if let Some((handle, true)) = &handle
+            if let Some(handle) = handle.as_ref().filter(|h| h.has_key())
                 && (mute || !blocked || handle.mutes().await.iter().any(|e| e.pubkey == hex))
             {
                 let mut r = handle.set_muted(target, mute).await;
@@ -1075,15 +1077,19 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 }
                 match r {
                     Ok(()) => list = "nostr",
-                    // Muting locally loses nothing; changing an unconfirmed
-                    // list could.
-                    Err(e) if mute && e == opal_notify::MUTE_UNSURE => {
-                        why = Some(opal_notify::MUTE_UNSURE)
+                    // Asks for the passphrase, or may have been saved.
+                    Err(e)
+                        if !mute
+                            || e == opal_notify::MUTE_NEEDS_UNLOCK
+                            || e == opal_notify::MUTE_INTERRUPTED =>
+                    {
+                        return Err(anyhow!("{e}"));
                     }
-                    Err(e) => return Err(anyhow!("{e}")),
+                    // Nothing was published: muting locally loses nothing.
+                    Err(e) => why = Some(e),
                 }
             } else if !mute
-                && let Some((handle, false)) = &handle
+                && let Some(handle) = &handle
                 && handle.mutes().await.iter().any(|e| e.pubkey == hex)
             {
                 return Err(anyhow!(
@@ -1091,8 +1097,8 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 ));
             }
 
-            // Opal's own list: where mutes go without a key, and where an
-            // unmute also takes them off.
+            // Opal's own list: where mutes go otherwise, and where an unmute
+            // also takes them off.
             let changed = {
                 let mut cfg = app.config.write().await;
                 let b = &mut cfg.notifications.blocked;
@@ -1123,7 +1129,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
         }
         "notifications.mutes" => {
             let mut out = Vec::new();
-            if let Some((handle, _)) = notify_handle(app).await {
+            if let Some(handle) = notify_handle(app).await {
                 for e in handle.mutes().await {
                     out.push((e.pubkey, if e.private { "private" } else { "public" }));
                 }
@@ -1456,20 +1462,9 @@ impl Pk {
     }
 }
 
-/// The running notification engine's mute handle, and whether the key is local.
-async fn notify_handle(app: &App) -> Option<(opal_notify::NotifyHandle, bool)> {
-    let (handle, account) = app
-        .notify
-        .lock()
-        .await
-        .as_ref()
-        .map(|(e, _)| (e.handle(), e.account()))?;
-    let local = app
-        .vault
-        .accounts()
-        .await
-        .is_ok_and(|a| a.contains(&account));
-    Some((handle, local))
+/// The running notification engine's mute handle.
+async fn notify_handle(app: &App) -> Option<opal_notify::NotifyHandle> {
+    app.notify.lock().await.as_ref().map(|(e, _)| e.handle())
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T> {
@@ -1515,6 +1510,70 @@ mod tests {
         app.accounts.set_current(&pk).unwrap();
         app.vault.unlock(PW).await.unwrap();
         (app, pk)
+    }
+
+    /// With notifications off there's no engine: mutes go to Opal's own
+    /// list, and say why.
+    #[tokio::test]
+    async fn mutes_without_notifications_use_opals_list() {
+        let (app, _) = test_app().await;
+        let dir = std::env::temp_dir().join(format!("opal-mute-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = {
+            let mut config = app.config.read().await.clone();
+            config.modules.notifications = false;
+            let a = App::new(Options {
+                config,
+                config_path: dir.join("opal.toml"),
+                db: Db::open_in_memory().unwrap(),
+                store: SecretStore::memory(),
+                vault_log_n: Some(4),
+            })
+            .await
+            .unwrap();
+            Arc::new(a)
+        };
+        let them = Keys::generate().public_key();
+        let r = call(
+            &app,
+            &ui(),
+            "notifications.mute",
+            json!({"pubkey": them.to_bech32().unwrap()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["list"], "opal");
+        assert_eq!(r["why"], "notifications are off");
+        assert_eq!(
+            app.config.read().await.notifications.blocked,
+            vec![them.to_hex()]
+        );
+        let list = call(&app, &ui(), "notifications.mutes", json!(null))
+            .await
+            .unwrap();
+        assert_eq!(list[0]["pubkey"], them.to_hex());
+        assert_eq!(list[0]["list"], "opal");
+
+        // Muting twice doesn't add twice; unmuting takes it off.
+        call(
+            &app,
+            &ui(),
+            "notifications.mute",
+            json!({"pubkey": them.to_hex()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.config.read().await.notifications.blocked.len(), 1);
+        call(
+            &app,
+            &ui(),
+            "notifications.unmute",
+            json!({"pubkey": them.to_hex()}),
+        )
+        .await
+        .unwrap();
+        assert!(app.config.read().await.notifications.blocked.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn peer(exe: &str) -> Peer {
@@ -2030,6 +2089,15 @@ mod tests {
                 "notifications.set_default_app",
                 json!({"id": "chromium.desktop"}),
             ),
+            (
+                "notifications.mute",
+                json!({"pubkey": "3f770d65d3a764a9c5cb503ae123e62ec7598ad035d836e2a810f3877a745b24"}),
+            ),
+            (
+                "notifications.unmute",
+                json!({"pubkey": "3f770d65d3a764a9c5cb503ae123e62ec7598ad035d836e2a810f3877a745b24"}),
+            ),
+            ("notifications.mutes", json!(null)),
         ] {
             let err = call(&app, &stranger, m, p).await.unwrap_err().to_string();
             assert_eq!(err, NEEDS_UI, "{m}");

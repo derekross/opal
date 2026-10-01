@@ -116,6 +116,8 @@ Item {
   // asking for it, then retries with it.
   property var guarded: null
   property string guardError: ""
+  // The card's request is on its way (a mute can take a while).
+  property bool guardBusy: false
 
   function runGuarded(method, params, onOk, why, onErr) {
     call(method, params, function(err, result) {
@@ -137,9 +139,10 @@ Item {
     var g = guarded
     if (!g || g.inFlight) return
     g.inFlight = true
+    root.guardBusy = true
     var fail = function(err) {
       g.inFlight = false
-      if (root.guarded === g) { root.guardError = err; return }
+      if (root.guarded === g) { root.guardBusy = false; root.guardError = err; return }
       root.message(err, true)
       if (g.onCancel) g.onCancel()
     }
@@ -151,7 +154,7 @@ Item {
       call(g.method, p, function(err2, result) {
         if (err2) { fail(err2); return }
         g.inFlight = false
-        if (root.guarded === g) { root.guarded = null; root.guardError = "" }
+        if (root.guarded === g) { root.guarded = null; root.guardError = ""; root.guardBusy = false }
         if (g.onOk) g.onOk(result)
       })
     })
@@ -162,6 +165,7 @@ Item {
   function setGuarded(g) {
     var old = guarded
     guardError = ""
+    guardBusy = false
     guarded = g
     if (old && !old.inFlight && old.onCancel) old.onCancel()
   }
@@ -170,6 +174,7 @@ Item {
     var g = guarded
     guarded = null
     guardError = ""
+    guardBusy = false
     if (g && !g.inFlight && g.onCancel) g.onCancel()
   }
 
@@ -244,10 +249,14 @@ Item {
     p[pubkey] = Object.assign({}, m, { committing: true })
     pendingMutes = p
     var done = function(r) {
-      root.undoMute(pubkey)
       root.message(r && r.list === "opal"
         ? "Muted " + m.name + " in Opal only" + (r.why ? ": " + r.why : "")
         : "Muted " + m.name, false)
+      // Show the rows again only once the list without them is in.
+      root.call("notifications.list", { limit: 150 }, function(e, list) {
+        if (!e) root.notifications = list || []
+        root.undoMute(pubkey)
+      })
       root.refreshNotifications()
     }
     call("notifications.mute", { pubkey: pubkey }, function(err, r) {
@@ -255,7 +264,7 @@ Item {
       if (err.indexOf("passphrase") !== -1) {
         root.setGuarded({ method: "notifications.mute", params: { pubkey: pubkey }, onOk: done,
           onCancel: function() { root.undoMute(pubkey) },
-          why: "Mute " + m.name + ": confirm with your Opal passphrase" })
+          why: root.locked ? "Unlock Opal to mute " + m.name : "Mute " + m.name + ": confirm with your Opal passphrase" })
       } else {
         root.undoMute(pubkey)
         root.message(err, true)
@@ -266,7 +275,7 @@ Item {
     runGuarded("notifications.unmute", { pubkey: pubkey }, function() {
       root.message("Unmuted " + name, false)
       root.refreshNotifications()
-    }, "Unmute " + name + ": confirm with your Opal passphrase",
+    }, root.locked ? "Unlock Opal to unmute " + name : "Unmute " + name + ": confirm with your Opal passphrase",
     // An error may still have changed something (a restart mid-save).
     function() { root.refreshMutes() })
   }
@@ -405,9 +414,13 @@ Item {
   function onSocketConnected(up) {
     if (up === root.linked) return
     root.linked = up
+    // Replies to requests sent before won't come: fail them, so nothing
+    // waits forever (a mute's rows, a card stuck on "Saving…").
+    var waiting = root._callbacks
+    root._callbacks = ({})
+    for (var id in waiting) waiting[id]("Opal restarted before answering; check that it took effect", null)
     if (up) {
       root.everConnected = true
-      root._callbacks = ({})
       root.call("subscribe", null, function(err, s) { if (!err) root.status = s || {} })
       root.refreshAll()
     } else {

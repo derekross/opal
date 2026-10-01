@@ -601,7 +601,111 @@ async fn muting_without_a_relay_list_changes_nothing() {
             .handle()
             .set_muted(Keys::generate().public_key(), true)
             .await,
-        Err(opal_notify::MUTE_UNSURE.to_string())
+        Err(opal_notify::MUTE_NO_RELAY_LIST.to_string())
     );
+    engine.stop().await;
+}
+
+/// A relay that takes the REQ and then never finishes it: it hangs up, or
+/// sends a CLOSED with no machine-readable prefix.
+async fn unfinished_relay(hang_up: bool) -> String {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                while let Some(Ok(msg)) = ws.next().await {
+                    let Message::Text(text) = msg else { continue };
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                    if v[0] != "REQ" {
+                        continue;
+                    }
+                    if hang_up {
+                        return;
+                    }
+                    let closed = serde_json::json!(["CLOSED", v[1], "too many subscriptions"]);
+                    let _ = ws.send(Message::text(closed.to_string())).await;
+                }
+            });
+        }
+    });
+    url
+}
+
+#[tokio::test]
+async fn relays_that_never_finish_answering_dont_count() {
+    for hang_up in [true, false] {
+        let boot = MockRelay::run().await.unwrap();
+        let boot_url = boot.url().await;
+        let bad = unfinished_relay(hang_up).await;
+        let me_keys = Keys::generate();
+        let b = connected(&boot_url).await;
+        // Two write relays: the bootstrap one answers, the other never does.
+        publish(
+            &b,
+            EventBuilder::new(Kind::RelayList, "")
+                .tag(Tag::parse(["r", boot_url.as_str(), "write"]).unwrap())
+                .tag(Tag::parse(["r", bad.as_str(), "write"]).unwrap())
+                .finalize(&me_keys)
+                .unwrap(),
+        )
+        .await;
+        let old = private_list(&me_keys, &[Keys::generate().public_key()], 1_700_000_000);
+        publish(&b, old.clone()).await;
+
+        let engine = unlocked_engine(&me_keys, boot_url.as_str()).await;
+        let r = engine
+            .handle()
+            .set_muted(Keys::generate().public_key(), true)
+            .await;
+        assert_eq!(
+            r,
+            Err(opal_notify::MUTE_UNSURE.to_string()),
+            "hang_up={hang_up}"
+        );
+        assert_eq!(newest_mute_list(&b, me_keys.public_key()).await.id, old.id);
+        engine.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn unmuting_the_last_private_entry_leaves_nothing_behind() {
+    let boot = MockRelay::run().await.unwrap();
+    let boot_url = boot.url().await;
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let them = Keys::generate().public_key();
+    let b = connected(&boot_url).await;
+    publish(
+        &b,
+        EventBuilder::new(Kind::RelayList, "")
+            .tag(Tag::parse(["r", boot_url.as_str()]).unwrap())
+            .finalize(&me_keys)
+            .unwrap(),
+    )
+    .await;
+    publish(
+        &b,
+        private_list(&me_keys, &[them], Timestamp::now().as_secs() - 60),
+    )
+    .await;
+
+    let engine = unlocked_engine(&me_keys, boot_url.as_str()).await;
+    let handle = engine.handle();
+    assert_eq!(handle.mutes().await.len(), 1);
+    handle.set_muted(them, false).await.unwrap();
+    assert!(newest_mute_list(&b, me).await.content.is_empty());
+    assert!(
+        handle.mutes().await.is_empty(),
+        "{:?}",
+        handle.mutes().await
+    );
+    // Unmuting again changes nothing and says so by not failing.
+    handle.set_muted(them, false).await.unwrap();
     engine.stop().await;
 }
