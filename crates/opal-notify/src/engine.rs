@@ -16,7 +16,7 @@ use opal_core::config::NotificationsConfig;
 use opal_core::keystore::ItemKind;
 use opal_core::vault::Vault;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::classify::{NotifType, Notification, classify};
@@ -31,6 +31,9 @@ const WRAP_BACKDATE_SECS: u64 = 2 * 86_400;
 const REFRESH_EVERY: Duration = Duration::from_secs(30 * 60);
 const PROFILE_TTL_SECS: u64 = 86_400;
 const FEED_SUB: &str = "opal-notify";
+/// Returned by [`NotifyEngine::set_muted`] when the key is needed and Opal is
+/// locked. The API matches on "passphrase" to ask for it.
+pub const MUTE_NEEDS_UNLOCK: &str = "unlock Opal with your passphrase to change your mute list";
 const DM_SUB: &str = "opal-dms";
 
 pub struct NotifyParams {
@@ -68,8 +71,28 @@ pub struct NotifyStatus {
     pub error: Option<String>,
 }
 
+/// One entry of your NIP-51 mute list.
+#[derive(Debug, Clone, Serialize)]
+pub struct MutedEntry {
+    pub pubkey: String,
+    /// In the encrypted part of the list (only you can see it).
+    pub private: bool,
+}
+
+enum Command {
+    SetMuted {
+        target: PublicKey,
+        mute: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Mutes {
+        reply: oneshot::Sender<Vec<MutedEntry>>,
+    },
+}
+
 pub struct NotifyEngine {
     task: JoinHandle<()>,
+    commands: mpsc::UnboundedSender<Command>,
     client: Client,
     events: broadcast::Sender<NotifyEvent>,
     status: Arc<RwLock<NotifyStatus>>,
@@ -85,6 +108,7 @@ impl NotifyEngine {
             ..Default::default()
         }));
         let account = params.account;
+        let (commands, commands_rx) = mpsc::unbounded_channel();
         let run = Runner {
             me: params.account,
             me_hex: params.account.to_hex(),
@@ -99,9 +123,10 @@ impl NotifyEngine {
             mute_event: None,
             private_mutes: None,
         };
-        let task = tokio::spawn(run.run());
+        let task = tokio::spawn(run.run(commands_rx));
         Self {
             task,
+            commands,
             client,
             events,
             status,
@@ -121,9 +146,48 @@ impl NotifyEngine {
         self.status.read().await.clone()
     }
 
+    /// For changing mutes without holding on to the engine.
+    pub fn handle(&self) -> NotifyHandle {
+        NotifyHandle {
+            commands: self.commands.clone(),
+        }
+    }
+
     pub async fn stop(self) {
         self.task.abort();
         self.client.shutdown().await;
+    }
+}
+
+#[derive(Clone)]
+pub struct NotifyHandle {
+    commands: mpsc::UnboundedSender<Command>,
+}
+
+impl NotifyHandle {
+    /// Add `target` to your mute list as a private (encrypted) entry, or
+    /// remove it from both parts. Fetches the newest list first and keeps
+    /// everything else in it. Needs the key.
+    pub async fn set_muted(&self, target: PublicKey, mute: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::SetMuted {
+                target,
+                mute,
+                reply,
+            })
+            .map_err(|_| "notifications aren't running".to_string())?;
+        rx.await
+            .map_err(|_| "notifications aren't running".to_string())?
+    }
+
+    /// The people on your mute list that Opal can read.
+    pub async fn mutes(&self) -> Vec<MutedEntry> {
+        let (reply, rx) = oneshot::channel();
+        if self.commands.send(Command::Mutes { reply }).is_err() {
+            return vec![];
+        }
+        rx.await.unwrap_or_default()
     }
 }
 
@@ -148,12 +212,13 @@ struct Runner {
 #[derive(Default)]
 struct Lists {
     read: Vec<RelayUrl>,
+    write: Vec<RelayUrl>,
     dm: Vec<RelayUrl>,
     mute_event: Option<Event>,
 }
 
 impl Runner {
-    async fn run(mut self) {
+    async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
         // First time for this account: the history we are about to catch up
         // on is not "new", so don't count it as unread.
         if self.store.last_seen(&self.me_hex).unwrap_or(0) == 0
@@ -248,6 +313,22 @@ impl Runner {
                         }
                     }
                 }
+                Some(cmd) = commands.recv() => match cmd {
+                    Command::SetMuted { target, mute, reply } => {
+                        let r = self.set_muted(target, mute, &bootstrap).await;
+                        let _ = reply.send(r);
+                        self.emit_status(true).await;
+                    }
+                    Command::Mutes { reply } => {
+                        let entries = self.mute_entries();
+                        // Muted people never notify, so their profiles are
+                        // only fetched for this list.
+                        for e in &entries {
+                            let _ = want_tx.send(Want::Profile(e.pubkey.clone()));
+                        }
+                        let _ = reply.send(entries);
+                    }
+                },
                 _ = refresh.tick() => {
                     // A failed fetch keeps the mutes we have.
                     if let Some(lists) = self.fetch_lists(&bootstrap).await {
@@ -291,7 +372,7 @@ impl Runner {
                 .cloned()
         };
         let mut lists = Lists::default();
-        let mut write = Vec::new();
+        let write = &mut lists.write;
         if let Some(ev) = newest(Kind::RelayList) {
             for (url, meta) in nip65::extract_relay_list(&ev) {
                 if meta.is_none() || meta == Some(RelayMetadata::Read) {
@@ -314,6 +395,7 @@ impl Runner {
         }
         lists.mute_event = newest(Kind::MuteList);
         // Your mute list lives on your own (write) relays too.
+        let write = lists.write.clone();
         if !write.is_empty() {
             for r in &write {
                 let _ = self.client.add_relay(r).await;
@@ -375,14 +457,9 @@ impl Runner {
                     Some(set) => Some(set),
                     None => match self.keys().await {
                         Some(keys) => {
-                            let plain = if ev.content.contains("?iv=") {
-                                nip04::decrypt(keys.secret_key(), &self.me, &ev.content).ok()
-                            } else {
-                                nip44::decrypt(keys.secret_key(), &self.me, &ev.content).ok()
-                            };
-                            let set: Option<HashSet<String>> = plain
-                                .and_then(|p| serde_json::from_str::<Vec<Vec<String>>>(&p).ok())
-                                .map(|tags| p_tags(tags.into_iter()).into_iter().collect());
+                            let set: Option<HashSet<String>> =
+                                decrypt_private(&keys, &self.me, &ev.content)
+                                    .map(|tags| p_tags(tags.into_iter()).into_iter().collect());
                             if let Some(set) = &set {
                                 self.private_mutes = Some((ev.id, set.clone()));
                                 self.save_mute_cache().await;
@@ -441,6 +518,116 @@ impl Runner {
         {
             tracing::warn!("couldn't cache private mutes: {e}");
         }
+    }
+
+    /// See [`NotifyEngine::set_muted`]. Refuses to publish rather than risk
+    /// dropping entries it couldn't read.
+    async fn set_muted(
+        &mut self,
+        target: PublicKey,
+        mute: bool,
+        bootstrap: &[RelayUrl],
+    ) -> Result<(), String> {
+        let keys = self.keys().await.ok_or(MUTE_NEEDS_UNLOCK)?;
+        let lists = self
+            .fetch_lists(bootstrap)
+            .await
+            .ok_or("couldn't reach your relays to read your mute list")?;
+        let current = match (lists.mute_event, self.mute_event.clone()) {
+            (Some(a), Some(b)) => Some(if a.created_at >= b.created_at { a } else { b }),
+            (a, b) => a.or(b),
+        };
+        let mut public: Vec<Tag> = vec![];
+        let mut private: Vec<Vec<String>> = vec![];
+        if let Some(ev) = &current {
+            public = ev.tags.iter().cloned().collect();
+            if !ev.content.is_empty() {
+                private = decrypt_private(&keys, &self.me, &ev.content).ok_or(
+                    "couldn't read the private part of your mute list, so it was left unchanged",
+                )?;
+            }
+        }
+        let hex = target.to_hex();
+        let is_target =
+            |t: &[String]| t.first().map(String::as_str) == Some("p") && t.get(1) == Some(&hex);
+        let listed =
+            public.iter().any(|t| is_target(t.as_slice())) || private.iter().any(|t| is_target(t));
+        if mute == listed {
+            return Ok(());
+        }
+        if mute {
+            private.push(vec!["p".into(), hex]);
+        } else {
+            public.retain(|t| !is_target(t.as_slice()));
+            private.retain(|t| !is_target(t));
+        }
+        let content = if private.is_empty() {
+            String::new()
+        } else {
+            let json = serde_json::to_string(&private).map_err(|e| e.to_string())?;
+            nip44::encrypt(keys.secret_key(), &self.me, json, nip44::Version::V2)
+                .map_err(|e| e.to_string())?
+        };
+        // Strictly newer than the list it replaces, or relays keep the old one.
+        let mut created = Timestamp::now();
+        if let Some(old) = &current
+            && created <= old.created_at
+        {
+            created = Timestamp::from(old.created_at.as_secs() + 1);
+        }
+        let ev = EventBuilder::new(Kind::MuteList, content)
+            .tags(public)
+            .custom_created_at(created)
+            .finalize(&keys)
+            .map_err(|e| e.to_string())?;
+        let mut relays: Vec<RelayUrl> = lists.write.clone();
+        for r in bootstrap {
+            if !relays.contains(r) {
+                relays.push(r.clone());
+            }
+        }
+        for r in &relays {
+            let _ = self.client.add_relay(r).await;
+        }
+        self.client.connect().and_wait(CONNECT_WAIT).await;
+        match self.client.send_event(&ev).to(relays).await {
+            Ok(out) if !out.success.is_empty() => {}
+            Ok(out) => {
+                return Err(format!(
+                    "no relay accepted your mute list: {}",
+                    out.failed.values().next().cloned().unwrap_or_default()
+                ));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+        self.apply_mutes(Some(&ev)).await;
+        Ok(())
+    }
+
+    fn mute_entries(&self) -> Vec<MutedEntry> {
+        let Some(ev) = &self.mute_event else {
+            return vec![];
+        };
+        let mut out: Vec<MutedEntry> = p_tags(ev.tags.iter().map(|t| t.as_slice().to_vec()))
+            .into_iter()
+            .map(|pubkey| MutedEntry {
+                pubkey,
+                private: false,
+            })
+            .collect();
+        if let Some((_, set)) = &self.private_mutes {
+            let mut private: Vec<&String> = set.iter().collect();
+            private.sort();
+            for pk in private {
+                if !out.iter().any(|e| &e.pubkey == pk) {
+                    out.push(MutedEntry {
+                        pubkey: pk.clone(),
+                        private: true,
+                    });
+                }
+            }
+        }
+        out
     }
 
     async fn keys(&self) -> Option<Keys> {
@@ -656,6 +843,16 @@ struct MuteCache {
     /// The mute list event the entries were decrypted from.
     event: String,
     pubkeys: Vec<String>,
+}
+
+/// The private tags of a NIP-51 list (NIP-44, or NIP-04 in older lists).
+fn decrypt_private(keys: &Keys, me: &PublicKey, content: &str) -> Option<Vec<Vec<String>>> {
+    let plain = if content.contains("?iv=") {
+        nip04::decrypt(keys.secret_key(), me, content).ok()
+    } else {
+        nip44::decrypt(keys.secret_key(), me, content).ok()
+    }?;
+    serde_json::from_str(&plain).ok()
 }
 
 fn p_tags(tags: impl Iterator<Item = Vec<String>>) -> Vec<String> {

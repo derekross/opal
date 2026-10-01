@@ -146,7 +146,12 @@ Item {
     })
   }
 
-  function cancelGuarded() { guarded = null; guardError = "" }
+  function cancelGuarded() {
+    var g = guarded
+    guarded = null
+    guardError = ""
+    if (g && g.onCancel) g.onCancel()
+  }
 
   // call() with a toast on error and an optional success callback.
   function run(method, params, onOk) {
@@ -185,6 +190,75 @@ Item {
   function refreshNotifications() {
     call("notifications.list", { limit: 150 }, function(e, r) { if (!e) root.notifications = r || [] })
     call("notifications.status", null, function(e, r) { if (!e) root.notifyStatus = r || {} })
+    refreshMutes()
+  }
+
+  // Muting from a notification. While unlocked it waits a few seconds so
+  // it can be undone; the person's rows are hidden meanwhile. Locked, the
+  // passphrase card stands in for the undo.
+  property var mutes: []
+  property var pendingMutes: ({})   // pubkey -> { name, at }
+  readonly property int muteUndoMs: 5000
+
+  function refreshMutes() {
+    call("notifications.mutes", null, function(e, r) { if (!e) root.mutes = r || [] })
+  }
+  function isMuting(pubkey) { return pendingMutes[pubkey] !== undefined }
+  function mute(pubkey, name) {
+    if (isMuting(pubkey)) return
+    var p = Object.assign({}, pendingMutes)
+    p[pubkey] = { name: name, at: Date.now() }
+    pendingMutes = p
+    // Locked: no undo window, the passphrase card asks right away.
+    if (locked && hasAccounts && !readOnly && identity.mode !== "external") _commitMute(pubkey)
+  }
+  function undoMute(pubkey) {
+    var p = Object.assign({}, pendingMutes)
+    delete p[pubkey]
+    pendingMutes = p
+  }
+  function _commitMute(pubkey) {
+    var m = pendingMutes[pubkey]
+    if (!m || m.committing) return
+    m.committing = true
+    pendingMutes = Object.assign({}, pendingMutes)
+    var done = function(r) {
+      root.undoMute(pubkey)
+      root.message(r && r.list === "opal"
+        ? "Muted " + m.name + " in Opal. There's no key here to update your mute list."
+        : "Muted " + m.name, false)
+      root.refreshNotifications()
+    }
+    call("notifications.mute", { pubkey: pubkey }, function(err, r) {
+      if (!err) { done(r); return }
+      if (err.indexOf("passphrase") !== -1) {
+        root.guardError = ""
+        root.guarded = { method: "notifications.mute", params: { pubkey: pubkey }, onOk: done,
+          onCancel: function() { root.undoMute(pubkey) },
+          why: "Mute " + m.name + ": confirm with your Opal passphrase" }
+      } else {
+        root.undoMute(pubkey)
+        root.message(err, true)
+      }
+    })
+  }
+  function unmute(pubkey, name) {
+    runGuarded("notifications.unmute", { pubkey: pubkey }, function() {
+      root.message("Unmuted " + name, false)
+      root.refreshNotifications()
+    }, "Unmute " + name + ": confirm with your Opal passphrase")
+  }
+  Timer {
+    id: muteTimer
+    interval: 250
+    repeat: true
+    running: Object.keys(root.pendingMutes).some(function(pk) { return !root.pendingMutes[pk].committing })
+    onTriggered: {
+      var now = Date.now()
+      for (var pk in root.pendingMutes) {
+        if (now - root.pendingMutes[pk].at >= root.muteUndoMs) root._commitMute(pk)
+      }
+    }
   }
   function refreshStatus() {
     call("status.get", null, function(e, r) { if (!e) root.statusInfo = r || {} })

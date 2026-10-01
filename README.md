@@ -6,7 +6,7 @@ daemon, one gem icon, and modules you switch on as you need them:
 | Module | What it does |
 |---|---|
 | **Signer** | A NIP-46 remote signer ("bunker"). Your nsec stays in the system keyring, encrypted with your passphrase. Web and desktop apps log in with a `bunker://` link or a `nostrconnect://` QR/link, and you decide what each one may do. Inspired by [Amber](https://github.com/greenart7c3/Amber). |
-| **Notifications** | Replies, mentions, reposts, reactions, zaps and NIP-17 DMs in an Inbox and as desktop popups, from your NIP-65 relays, honoring your NIP-51 mute list (private entries too). Inspired by [Omastr](https://github.com/barrydeen/omastr). |
+| **Notifications** | Replies, mentions, reposts, reactions, zaps and NIP-17 DMs in an Inbox and as desktop popups, from your NIP-65 relays, honoring your NIP-51 mute list (private entries too). Hover a notification to mute its author: they're added to your mute list as a private entry, with a few seconds to undo, and Settings lists your mutes with Unmute. Inspired by [Omastr](https://github.com/barrydeen/omastr). |
 | **Status** | NIP-38 statuses: what you're playing in any MPRIS player, a status you set, and automatic ones (calendar, away, focus). Optional scrobbles as kind 1073 ([draft NIP](docs/nip-scrobble.md)). Grew out of [noscrobble](https://github.com/derekross/noscrobble). |
 
 ## Features

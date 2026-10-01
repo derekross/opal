@@ -28,6 +28,15 @@ Column {
   readonly property var items: {
     var all = svc ? svc.notifications : []
     if (svc && !svc.canReadDms) all = all.filter(function(n) { return n.type !== "dm" })
+    // Someone being muted keeps one row, for the undo bar.
+    var pending = svc ? svc.pendingMutes : ({})
+    var kept = {}
+    all = all.filter(function(n) {
+      if (pending[n.author] === undefined) return true
+      if (kept[n.author]) return false
+      kept[n.author] = true
+      return true
+    })
     if (filter === "all") return all
     return all.filter(function(n) {
       if (filter === "replies") return n.type === "reply" || n.type === "mention"
@@ -114,14 +123,50 @@ Column {
   Repeater {
     model: root.items.slice(0, 80)
     delegate: CursorSurface {
+      id: item
       required property var modelData
+      readonly property var muting: root.svc ? root.svc.pendingMutes[modelData.author] : undefined
+      readonly property bool canMute: !!root.svc && modelData.author !== (root.st.status || {}).account
+      property bool muteHovered: false
+      readonly property bool showMute: canMute && !muting && (rowMouse.containsMouse || muteHovered)
       width: root.width
       foreground: root.foreground
-      current: modelData.unread
-      implicitHeight: row.implicitHeight + Style.spacing.lg
+      current: modelData.unread && !muting
+      implicitHeight: (muting ? muteBar.implicitHeight : row.implicitHeight) + Style.spacing.lg
+
+      Row {
+        id: muteBar
+        visible: !!item.muting
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Style.space(6)
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(10)
+        Text {
+          textFormat: Text.PlainText
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - (undo.visible ? undo.width + parent.spacing : 0)
+          elide: Text.ElideRight
+          color: root.dim
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          text: item.muting
+            ? (item.muting.committing ? "Muting " : "Muted ") + item.muting.name + (item.muting.committing ? "…" : "")
+            : ""
+        }
+        Button {
+          id: undo
+          visible: !!item.muting && !item.muting.committing
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Undo"
+          foreground: root.foreground
+          onClicked: root.svc.undoMute(item.modelData.author)
+        }
+      }
 
       Row {
         id: row
+        visible: !item.muting
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.leftMargin: Style.space(6)
@@ -162,7 +207,7 @@ Column {
           spacing: Style.space(2)
           Text {
             textFormat: Text.PlainText
-            width: parent.width
+            width: parent.width - (item.showMute ? muteButton.width : 0)
             elide: Text.ElideRight
             color: root.foreground
             font.family: Style.font.family
@@ -202,12 +247,31 @@ Column {
         }
       }
       MouseArea {
+        id: rowMouse
         anchors.fill: parent
-        enabled: !!modelData.url
-        cursorShape: Qt.PointingHandCursor
+        enabled: !item.muting
+        hoverEnabled: true
+        cursorShape: modelData.url ? Qt.PointingHandCursor : Qt.ArrowCursor
         onClicked: {
+          if (!modelData.url) return
           Quickshell.execDetached(["xdg-open", modelData.url])
           root.opened()
+        }
+      }
+      PanelActionButton {
+        id: muteButton
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: Style.space(4)
+        visible: item.showMute
+        iconText: "󰝟"
+        tooltipText: "Mute " + root.name(item.modelData)
+        foreground: root.dim
+        hoverColor: root.foreground
+        onHovered: function(h) { item.muteHovered = h }
+        onClicked: {
+          item.muteHovered = false
+          root.svc.mute(item.modelData.author, root.name(item.modelData))
         }
       }
     }

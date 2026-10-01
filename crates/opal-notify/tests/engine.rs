@@ -271,3 +271,129 @@ async fn private_mutes_survive_a_restart_while_locked() {
             .is_none()
     );
 }
+
+async fn newest_mute_list(client: &Client, me: PublicKey) -> Event {
+    client
+        .fetch_events(Filter::new().author(me).kind(Kind::MuteList))
+        .timeout(Duration::from_secs(3))
+        .await
+        .unwrap()
+        .into_iter()
+        .max_by_key(|e| e.created_at)
+        .unwrap()
+}
+
+fn private_tags(keys: &Keys, ev: &Event) -> Vec<Vec<String>> {
+    if ev.content.is_empty() {
+        return vec![];
+    }
+    let plain = nip44::decrypt(keys.secret_key(), &keys.public_key(), &ev.content).unwrap();
+    serde_json::from_str(&plain).unwrap()
+}
+
+#[tokio::test]
+async fn muting_from_opal_keeps_the_rest_of_the_list() {
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await;
+    let publisher = Client::default();
+    publisher.add_relay(&url).await.unwrap();
+    publisher.connect().and_wait(Duration::from_secs(3)).await;
+
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let public_one = Keys::generate().public_key();
+    let private_one = Keys::generate().public_key();
+    let target = Keys::generate();
+
+    // Written by another client: a public entry, a hashtag, a private entry.
+    let private = serde_json::to_string(&vec![
+        vec!["p".to_string(), private_one.to_hex()],
+        vec!["word".to_string(), "gm".to_string()],
+    ])
+    .unwrap();
+    let private = nip44::encrypt(me_keys.secret_key(), &me, private, nip44::Version::V2).unwrap();
+    let original = EventBuilder::new(Kind::MuteList, private)
+        .tag(Tag::public_key(public_one))
+        .tag(Tag::hashtag("spam"))
+        .finalize(&me_keys)
+        .unwrap();
+    publish(&publisher, original.clone()).await;
+
+    let vault = Arc::new(Vault::with_log_n(SecretStore::memory(), 4));
+    vault.add_account(me_keys.clone(), "pw").await.unwrap();
+    let store = NotifyStore::new(Db::open_in_memory().unwrap()).unwrap();
+    let engine = NotifyEngine::start(NotifyParams {
+        account: me,
+        config: NotificationsConfig {
+            bootstrap_relays: vec![url.to_string()],
+            ..Default::default()
+        },
+        store: store.clone(),
+        vault: Some(vault.clone()),
+    });
+    let mut events = engine.subscribe();
+    while !matches!(events.recv().await, Ok(NotifyEvent::Status { .. })) {}
+    let handle = engine.handle();
+
+    // Locked: asks for the passphrase and publishes nothing.
+    assert_eq!(
+        handle.set_muted(target.public_key(), true).await,
+        Err(opal_notify::MUTE_NEEDS_UNLOCK.to_string())
+    );
+
+    // A note from the target is already stored; muting removes it.
+    vault.unlock("pw").await.unwrap();
+    publish(
+        &publisher,
+        tagged(&target, Kind::TextNote, "noise", &me, vec![]),
+    )
+    .await;
+    assert_eq!(wait_for(&store, &me.to_hex(), 1).await.len(), 1);
+
+    handle.set_muted(target.public_key(), true).await.unwrap();
+    let ev = newest_mute_list(&publisher, me).await;
+    assert!(ev.created_at > original.created_at);
+    assert_eq!(ev.tags, original.tags, "public part untouched");
+    let private = private_tags(&me_keys, &ev);
+    assert!(private.contains(&vec!["p".to_string(), private_one.to_hex()]));
+    assert!(private.contains(&vec!["word".to_string(), "gm".to_string()]));
+    assert!(
+        private.contains(&vec!["p".to_string(), target.public_key().to_hex()]),
+        "the new mute is private"
+    );
+    assert!(store.list(&me.to_hex(), 100, None).unwrap().is_empty());
+    let mutes = handle.mutes().await;
+    assert!(
+        mutes
+            .iter()
+            .any(|e| e.pubkey == target.public_key().to_hex() && e.private)
+    );
+    assert!(
+        mutes
+            .iter()
+            .any(|e| e.pubkey == public_one.to_hex() && !e.private)
+    );
+
+    // Unmuting removes it from either part, and only it.
+    handle.set_muted(public_one, false).await.unwrap();
+    handle.set_muted(target.public_key(), false).await.unwrap();
+    let ev = newest_mute_list(&publisher, me).await;
+    assert_eq!(ev.tags.len(), 1, "only the hashtag is left: {:?}", ev.tags);
+    assert_eq!(
+        private_tags(&me_keys, &ev),
+        vec![
+            vec!["p".to_string(), private_one.to_hex()],
+            vec!["word".to_string(), "gm".to_string()],
+        ]
+    );
+
+    // A list Opal can't read is never overwritten.
+    let unreadable = EventBuilder::new(Kind::MuteList, "not encrypted")
+        .custom_created_at(Timestamp::from(ev.created_at.as_secs() + 10))
+        .finalize(&me_keys)
+        .unwrap();
+    publish(&publisher, unreadable.clone()).await;
+    assert!(handle.set_muted(target.public_key(), true).await.is_err());
+    assert_eq!(newest_mute_list(&publisher, me).await.id, unreadable.id);
+    engine.stop().await;
+}

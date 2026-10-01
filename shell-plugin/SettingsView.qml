@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "util.js" as U
 
 // Signer settings, modules and the kill switch.
 Column {
@@ -322,6 +323,81 @@ Column {
       checked: parent.n.dm_previews === true
       foreground: root.foreground
       onClicked: root.set({ notifications: { dm_previews: !checked } })
+    }
+
+    PanelSectionHeader {
+      text: "MUTED"
+      foreground: root.dim
+      visible: !!root.svc && root.svc.mutes.length > 0
+    }
+    Column {
+      id: mutedList
+      width: parent.width - parent.leftPadding
+      visible: !!root.svc && root.svc.mutes.length > 0
+      spacing: Style.space(2)
+      property bool showAll: false
+      readonly property var all: root.svc ? root.svc.mutes : []
+
+      Repeater {
+        model: mutedList.showAll ? mutedList.all : mutedList.all.slice(0, 5)
+        delegate: Item {
+          required property var modelData
+          readonly property string label: modelData.name || U.shortKey(modelData.pubkey)
+          width: mutedList.width
+          implicitHeight: Style.space(34)
+
+          Avatar {
+            id: mutedAvatar
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            size: Style.space(24)
+            width: size
+            height: size
+            picture: modelData.picture || ""
+            foreground: root.foreground
+          }
+          Column {
+            anchors.left: mutedAvatar.right
+            anchors.leftMargin: Style.space(10)
+            anchors.right: unmuteButton.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              elide: Text.ElideRight
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              text: parent.parent.label
+            }
+            Text {
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              text: modelData.list === "private" ? "Private mute"
+                : modelData.list === "public" ? "Public mute" : "Opal only"
+            }
+          }
+          PanelActionButton {
+            id: unmuteButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "󰕾"
+            tooltipText: "Unmute"
+            foreground: root.dim
+            hoverColor: root.foreground
+            onClicked: root.svc.unmute(modelData.pubkey, parent.label)
+          }
+        }
+      }
+      Button {
+        visible: mutedList.all.length > 5
+        text: mutedList.showAll ? "Show fewer" : "Show all " + mutedList.all.length
+        foreground: root.dim
+        onClicked: mutedList.showAll = !mutedList.showAll
+      }
     }
   }
 

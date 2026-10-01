@@ -1029,6 +1029,93 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             Ok(json!({"ok": true}))
         }
 
+        // Mute from a notification: a private entry on your NIP-51 list when
+        // the key is here (the passphrase unlocks it if needed), Opal's own
+        // block list otherwise.
+        "notifications.mute" | "notifications.unmute" => {
+            #[derive(Deserialize)]
+            struct P {
+                pubkey: String,
+                passphrase: Option<Zeroizing<String>>,
+            }
+            let p: P = parse(params)?;
+            let target = PublicKey::parse(&p.pubkey)?;
+            let mute = method == "notifications.mute";
+            let handle = notify_handle(app).await;
+            // Opal's own list: where mutes go without a key, and the first
+            // place an unmute looks.
+            let hex = target.to_hex();
+            let was_blocked = {
+                let mut cfg = app.config.write().await;
+                let had = cfg
+                    .notifications
+                    .blocked
+                    .iter()
+                    .any(|b| PublicKey::parse(b).is_ok_and(|pk| pk == target));
+                if !mute && had {
+                    cfg.notifications
+                        .blocked
+                        .retain(|b| PublicKey::parse(b).is_ok_and(|pk| pk != target));
+                    cfg.save_to(&app.config_path)?;
+                }
+                had
+            };
+            let Some((handle, local)) = handle else {
+                return Err(anyhow!("notifications are off"));
+            };
+            let on_list = handle.mutes().await.iter().any(|e| e.pubkey == hex);
+            if !local || (!mute && !on_list) {
+                if mute && !was_blocked {
+                    let mut cfg = app.config.write().await;
+                    cfg.notifications.blocked.push(hex);
+                    cfg.save_to(&app.config_path)?;
+                }
+                crate::modules::reconcile(app).await;
+                return Ok(json!({"ok": true, "list": "opal"}));
+            }
+            let mut r = handle.set_muted(target, mute).await;
+            if matches!(&r, Err(e) if e == opal_notify::MUTE_NEEDS_UNLOCK)
+                && let Some(pass) = &p.passphrase
+            {
+                app.vault.unlock(pass).await?;
+                app.touch().await;
+                app.emit_state().await;
+                r = handle.set_muted(target, mute).await;
+            }
+            r.map_err(|e| anyhow!("{e}"))?;
+            if was_blocked {
+                crate::modules::reconcile(app).await;
+            }
+            Ok(json!({"ok": true, "list": "nostr"}))
+        }
+        "notifications.mutes" => {
+            let mut out = Vec::new();
+            if let Some((handle, _)) = notify_handle(app).await {
+                for e in handle.mutes().await {
+                    out.push((e.pubkey, if e.private { "private" } else { "public" }));
+                }
+            }
+            for b in app.config.read().await.notifications.blocked.clone() {
+                if let Ok(pk) = PublicKey::parse(&b) {
+                    let hex = pk.to_hex();
+                    if !out.iter().any(|(p, _)| *p == hex) {
+                        out.push((hex, "opal"));
+                    }
+                }
+            }
+            Ok(json!(
+                out.into_iter()
+                    .map(|(pubkey, list)| {
+                        let profile = app.notify_store.profile(&pubkey).ok().flatten();
+                        let (name, picture) = profile
+                            .map(|(p, _)| (p.display_name.or(p.name), p.picture))
+                            .unwrap_or_default();
+                        json!({"pubkey": pubkey, "list": list, "name": name, "picture": picture})
+                    })
+                    .collect::<Vec<_>>()
+            ))
+        }
+
         "kinds.label" => {
             #[derive(Deserialize)]
             struct P {
@@ -1334,6 +1421,22 @@ impl Pk {
     fn pubkey(&self) -> Result<PublicKey> {
         Ok(PublicKey::parse(&self.pubkey)?)
     }
+}
+
+/// The running notification engine's mute handle, and whether the key is local.
+async fn notify_handle(app: &App) -> Option<(opal_notify::NotifyHandle, bool)> {
+    let (handle, account) = app
+        .notify
+        .lock()
+        .await
+        .as_ref()
+        .map(|(e, _)| (e.handle(), e.account()))?;
+    let local = app
+        .vault
+        .accounts()
+        .await
+        .is_ok_and(|a| a.contains(&account));
+    Some((handle, local))
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T> {
