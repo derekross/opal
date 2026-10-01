@@ -1056,6 +1056,11 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             // asks it (it reads the current list), unless the person is
             // only on Opal's own list.
             let mut list = "opal";
+            let mut why = if handle.as_ref().is_some_and(|(_, local)| *local) {
+                None
+            } else {
+                Some("there's no key here to change your Nostr mute list")
+            };
             if let Some((handle, true)) = &handle
                 && (mute || !blocked || handle.mutes().await.iter().any(|e| e.pubkey == hex))
             {
@@ -1068,8 +1073,15 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                     app.emit_state().await;
                     r = handle.set_muted(target, mute).await;
                 }
-                r.map_err(|e| anyhow!("{e}"))?;
-                list = "nostr";
+                match r {
+                    Ok(()) => list = "nostr",
+                    // Muting locally loses nothing; changing an unconfirmed
+                    // list could.
+                    Err(e) if mute && e == opal_notify::MUTE_UNSURE => {
+                        why = Some(opal_notify::MUTE_UNSURE)
+                    }
+                    Err(e) => return Err(anyhow!("{e}")),
+                }
             } else if !mute
                 && let Some((handle, false)) = &handle
                 && handle.mutes().await.iter().any(|e| e.pubkey == hex)
@@ -1107,7 +1119,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 }
                 crate::modules::reconcile(app).await;
             }
-            Ok(json!({"ok": true, "list": list}))
+            Ok(json!({"ok": true, "list": list, "why": if list == "opal" { why } else { None }}))
         }
         "notifications.mutes" => {
             let mut out = Vec::new();

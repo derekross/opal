@@ -547,3 +547,61 @@ async fn muting_with_your_write_relays_down_publishes_nothing() {
     assert_eq!(newest_mute_list(&b, me_keys.public_key()).await.id, old.id);
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn muting_follows_your_newest_relay_list() {
+    // Bootstrap has an old relay list naming an old relay, which still has
+    // your old mutes and a newer relay list naming the relay you use now.
+    let boot = MockRelay::run().await.unwrap();
+    let old = MockRelay::run().await.unwrap();
+    let new = MockRelay::run().await.unwrap();
+    let (boot_url, old_url, new_url) = (boot.url().await, old.url().await, new.url().await);
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let now = Timestamp::now().as_secs();
+    let relay_list = |url: &RelayUrl, at: u64| {
+        EventBuilder::new(Kind::RelayList, "")
+            .tag(Tag::parse(["r", url.as_str()]).unwrap())
+            .custom_created_at(Timestamp::from(at))
+            .finalize(&me_keys)
+            .unwrap()
+    };
+    let kept = Keys::generate().public_key();
+    let target = Keys::generate().public_key();
+
+    publish(&connected(&boot_url).await, relay_list(&old_url, now - 300)).await;
+    let o = connected(&old_url).await;
+    publish(&o, relay_list(&new_url, now - 200)).await;
+    let stale = private_list(&me_keys, &[], now - 150);
+    publish(&o, stale.clone()).await;
+    let n = connected(&new_url).await;
+    publish(&n, relay_list(&new_url, now - 200)).await;
+    publish(&n, private_list(&me_keys, &[kept], now - 100)).await;
+
+    let engine = unlocked_engine(&me_keys, boot_url.as_str()).await;
+    engine.handle().set_muted(target, true).await.unwrap();
+    let ev = newest_mute_list(&n, me).await;
+    let private = private_tags(&me_keys, &ev);
+    assert!(
+        private.contains(&vec!["p".to_string(), kept.to_hex()]),
+        "{private:?}"
+    );
+    assert!(private.contains(&vec!["p".to_string(), target.to_hex()]));
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn muting_without_a_relay_list_changes_nothing() {
+    let boot = MockRelay::run().await.unwrap();
+    let boot_url = boot.url().await;
+    let me_keys = Keys::generate();
+    let engine = unlocked_engine(&me_keys, boot_url.as_str()).await;
+    assert_eq!(
+        engine
+            .handle()
+            .set_muted(Keys::generate().public_key(), true)
+            .await,
+        Err(opal_notify::MUTE_UNSURE.to_string())
+    );
+    engine.stop().await;
+}

@@ -117,47 +117,60 @@ Item {
   property var guarded: null
   property string guardError: ""
 
-  function runGuarded(method, params, onOk, why) {
+  function runGuarded(method, params, onOk, why, onErr) {
     call(method, params, function(err, result) {
       if (!err) { if (onOk) onOk(result); return }
       if (err.indexOf("passphrase") !== -1) {
-        root.setGuarded({ method: method, params: params || {}, onOk: onOk, why: why || "Confirm with your Opal passphrase" })
+        root.setGuarded({ method: method, params: params || {}, onOk: onOk, onCancel: onErr,
+          why: why || "Confirm with your Opal passphrase" })
       } else {
         root.message(err, true)
+        if (onErr) onErr()
       }
     })
   }
 
+  // A card stays up for a retry while it's the one showing. Once replaced
+  // or dismissed, its request still finishes; a failure then ends in a
+  // toast and its onCancel.
   function confirmGuarded(passphrase) {
     var g = guarded
-    if (!g) return
+    if (!g || g.inFlight) return
+    g.inFlight = true
+    var fail = function(err) {
+      g.inFlight = false
+      if (root.guarded === g) { root.guardError = err; return }
+      root.message(err, true)
+      if (g.onCancel) g.onCancel()
+    }
     // The same passphrase signs this shell in, if it hasn't yet.
     signIn(passphrase, function(err) {
-      if (err) { root.guardError = err; return }
+      if (err) { fail(err); return }
       var p = Object.assign({}, g.params)
       p.passphrase = passphrase
       call(g.method, p, function(err2, result) {
-        if (err2) { root.guardError = err2; return }
-        root.guarded = null
-        root.guardError = ""
+        if (err2) { fail(err2); return }
+        g.inFlight = false
+        if (root.guarded === g) { root.guarded = null; root.guardError = "" }
         if (g.onOk) g.onOk(result)
       })
     })
   }
 
-  // One card at a time: a new request cancels the one it replaces.
+  // One card at a time: a new request replaces the one showing, which is
+  // cancelled unless its request is already on its way.
   function setGuarded(g) {
     var old = guarded
     guardError = ""
     guarded = g
-    if (old && old.onCancel) old.onCancel()
+    if (old && !old.inFlight && old.onCancel) old.onCancel()
   }
 
   function cancelGuarded() {
     var g = guarded
     guarded = null
     guardError = ""
-    if (g && g.onCancel) g.onCancel()
+    if (g && !g.inFlight && g.onCancel) g.onCancel()
   }
 
   // call() with a toast on error and an optional success callback.
@@ -233,7 +246,7 @@ Item {
     var done = function(r) {
       root.undoMute(pubkey)
       root.message(r && r.list === "opal"
-        ? "Muted " + m.name + " in Opal. There's no key here to update your mute list."
+        ? "Muted " + m.name + " in Opal only" + (r.why ? ": " + r.why : "")
         : "Muted " + m.name, false)
       root.refreshNotifications()
     }
@@ -253,9 +266,9 @@ Item {
     runGuarded("notifications.unmute", { pubkey: pubkey }, function() {
       root.message("Unmuted " + name, false)
       root.refreshNotifications()
-    }, "Unmute " + name + ": confirm with your Opal passphrase")
-    // An error may leave things changed (a restart mid-save): re-read.
-    Qt.callLater(refreshMutes)
+    }, "Unmute " + name + ": confirm with your Opal passphrase",
+    // An error may still have changed something (a restart mid-save).
+    function() { root.refreshMutes() })
   }
   Timer {
     id: muteTimer

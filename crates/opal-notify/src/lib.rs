@@ -8,6 +8,7 @@ pub mod store;
 
 pub use classify::{NotifType, Notification, classify};
 pub use engine::{
-    MUTE_NEEDS_UNLOCK, MutedEntry, NotifyEngine, NotifyEvent, NotifyHandle, NotifyParams,
+    MUTE_NEEDS_UNLOCK, MUTE_UNSURE, MutedEntry, NotifyEngine, NotifyEvent, NotifyHandle,
+    NotifyParams,
 };
 pub use store::{NotifyStore, StoredNotification};
