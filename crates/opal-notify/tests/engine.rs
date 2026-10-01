@@ -890,3 +890,110 @@ async fn dms_on_inbox_relays_that_require_auth_arrive_after_unlock() {
     assert_eq!(list[0].n.ntype, NotifType::Dm);
     engine.stop().await;
 }
+
+/// Like Haven's chat relay: one AUTH challenge per connection, "CLOSED
+/// auth-required:" (with no new challenge) until authenticated, then the
+/// stored events. Accepts any well-formed AUTH event for its challenge.
+async fn challenge_once_relay(stored: Vec<Event>) -> String {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let stored = Arc::new(stored);
+    tokio::spawn(async move {
+        let mut n = 0u32;
+        while let Ok((tcp, _)) = listener.accept().await {
+            n += 1;
+            let challenge = format!("challenge-{n}");
+            let stored = stored.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                let send = |v: serde_json::Value| Message::text(v.to_string());
+                let _ = ws.send(send(serde_json::json!(["AUTH", challenge]))).await;
+                let mut authed = false;
+                while let Some(Ok(msg)) = ws.next().await {
+                    let Message::Text(text) = msg else { continue };
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                    match v[0].as_str() {
+                        Some("AUTH") => {
+                            let ev = Event::from_json(v[1].to_string()).unwrap();
+                            let ok = ev.verify().is_ok()
+                                && ev.kind == Kind::Authentication
+                                && ev.tags.iter().any(|t| {
+                                    t.as_slice() == ["challenge".to_string(), challenge.clone()]
+                                });
+                            authed |= ok;
+                            let _ = ws
+                                .send(send(serde_json::json!(["OK", ev.id.to_hex(), ok, ""])))
+                                .await;
+                        }
+                        Some("REQ") if !authed => {
+                            let closed = serde_json::json!([
+                                "CLOSED",
+                                v[1],
+                                "auth-required: this relay only serves its owner"
+                            ]);
+                            let _ = ws.send(send(closed)).await;
+                        }
+                        Some("REQ") => {
+                            for ev in stored.iter() {
+                                let msg = serde_json::json!([
+                                    "EVENT",
+                                    v[1],
+                                    serde_json::from_str::<serde_json::Value>(&ev.as_json())
+                                        .unwrap()
+                                ]);
+                                let _ = ws.send(send(msg)).await;
+                            }
+                            let _ = ws.send(send(serde_json::json!(["EOSE", v[1]]))).await;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+    });
+    url
+}
+
+#[tokio::test]
+async fn relays_that_challenge_once_deliver_dms_after_unlock() {
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let alice = Keys::generate();
+    let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "only after auth")
+        .tag(Tag::public_key(me))
+        .finalize_unsigned(alice.public_key());
+    let wrap = GiftWrapBuilder::new(me, rumor).finalize(&alice).unwrap();
+    let url = challenge_once_relay(vec![wrap]).await;
+
+    // Starts locked: the first challenge goes unanswered.
+    let vault = Arc::new(Vault::with_log_n(SecretStore::memory(), 4));
+    vault.add_account(me_keys.clone(), "pw").await.unwrap();
+    let store = NotifyStore::new(Db::open_in_memory().unwrap()).unwrap();
+    let engine = NotifyEngine::start(NotifyParams {
+        account: me,
+        config: NotificationsConfig {
+            bootstrap_relays: vec![url.clone()],
+            ..Default::default()
+        },
+        store: store.clone(),
+        vault: Some(vault.clone()),
+    });
+    let mut events = engine.subscribe();
+    while !matches!(events.recv().await, Ok(NotifyEvent::Status { .. })) {}
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(store.list(&me.to_hex(), 100, None).unwrap().is_empty());
+
+    vault.unlock("pw").await.unwrap();
+    let list = wait_for(&store, &me.to_hex(), 1).await;
+    assert_eq!(
+        list.len(),
+        1,
+        "a new connection brings a challenge Opal can answer"
+    );
+    assert_eq!(list[0].n.ntype, NotifType::Dm);
+    engine.stop().await;
+}

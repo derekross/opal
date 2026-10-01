@@ -143,7 +143,7 @@ impl NotifyEngine {
             started: Timestamp::now().as_secs(),
             mute_event: None,
             private_mutes: None,
-            dm_relays: Vec::new(),
+            auth_pending: HashSet::new(),
         };
         let task = tokio::spawn(run.run(commands_rx));
         Self {
@@ -242,8 +242,8 @@ struct Runner {
     mute_event: Option<Event>,
     /// In list order (oldest first), as the list's author added them.
     private_mutes: Option<(EventId, Vec<String>)>,
-    /// Where DMs are read, to reconnect them once AUTH can be answered.
-    dm_relays: Vec<RelayUrl>,
+    /// Relays that asked for AUTH while Opal was locked (no key to answer).
+    auth_pending: HashSet<RelayUrl>,
 }
 
 /// The user's relay lists and mutes.
@@ -292,9 +292,6 @@ impl Runner {
         self.client.connect().and_wait(CONNECT_WAIT).await;
 
         let dms = self.cfg.types.dms && self.vault.is_some();
-        if dms {
-            self.dm_relays = dm.clone();
-        }
         {
             let mut st = self.status.write().await;
             st.read_relays = read.iter().map(|r| r.to_string()).collect();
@@ -330,8 +327,14 @@ impl Runner {
             tokio::select! {
                 n = notifications.next() => {
                     let Some(n) = n else { break };
-                    if let ClientNotification::Event { relay_url, event, .. } = n {
-                        self.handle(*event, relay_url, &want_tx).await;
+                    match n {
+                        ClientNotification::Event { relay_url, event, .. } => {
+                            self.handle(*event, relay_url, &want_tx).await;
+                        }
+                        ClientNotification::Message { relay_url, message } => {
+                            self.note_auth_request(relay_url, &message);
+                        }
+                        _ => {}
                     }
                 }
                 changed = async {
@@ -343,6 +346,8 @@ impl Runner {
                     if !changed { unlocked = None; continue; }
                     let is_unlocked = unlocked.as_ref().is_some_and(|rx| *rx.borrow());
                     if is_unlocked {
+                        // Relays that wanted AUTH while locked can have it now.
+                        self.reconnect_for_auth().await;
                         // Private mutes and waiting DMs need the key.
                         if let Some(lists) = self.fetch_lists(&bootstrap).await {
                             self.apply_mutes(lists.mute_event.as_ref()).await;
@@ -351,7 +356,6 @@ impl Runner {
                         }
                         if dms {
                             self.process_pending_wraps(&want_tx).await;
-                            self.reauth_dm_relays().await;
                         }
                     }
                 }
@@ -707,13 +711,14 @@ impl Runner {
         };
         // Newest first: lists grow at the end, and Opal adds privately.
         let public = p_tags(ev.tags.iter().map(|t| t.as_slice().to_vec()));
+        let public_set: HashSet<&String> = public.iter().collect();
         let mut out: Vec<MutedEntry> = Vec::new();
         let mut seen: HashSet<&String> = HashSet::new();
         // Only the private entries in effect: the decrypted list may be from
         // an older version when the newest one can't be read.
         if let Some((_, list)) = &self.private_mutes {
             for pk in list.iter().rev() {
-                if self.muted.contains(pk) && !public.contains(pk) && seen.insert(pk) {
+                if self.muted.contains(pk) && !public_set.contains(pk) && seen.insert(pk) {
                     out.push(MutedEntry {
                         pubkey: pk.clone(),
                         private: true,
@@ -732,14 +737,39 @@ impl Runner {
         out
     }
 
-    /// An AUTH challenge that came while Opal was locked went unanswered,
-    /// and relays send one per connection: reconnect, which also
-    /// resubscribes once AUTH succeeds.
-    async fn reauth_dm_relays(&self) {
-        for url in &self.dm_relays {
-            if let Ok(Some(relay)) = self.client.relay(url).await {
-                relay.disconnect();
-                let _ = relay.try_connect().timeout(CONNECT_WAIT).await;
+    /// A relay asked for AUTH while there was no key to answer with.
+    fn note_auth_request(&mut self, relay: RelayUrl, message: &RelayMessage) {
+        if self.vault.as_ref().is_none_or(|v| v.is_unlocked()) {
+            return;
+        }
+        let asked = match message {
+            RelayMessage::Auth { .. } => true,
+            RelayMessage::Closed { message, .. } | RelayMessage::Ok { message, .. } => {
+                message.starts_with("auth-required:")
+            }
+            _ => false,
+        };
+        if asked {
+            self.auth_pending.insert(relay);
+        }
+    }
+
+    /// Relays challenge once per connection (khatru, Haven), so one that
+    /// asked while Opal was locked gets a new connection, which brings a
+    /// new challenge; subscriptions are resent once AUTH succeeds. connect()
+    /// keeps retrying on its own, so a relay that's down now isn't lost, and
+    /// none of this holds up the loop.
+    async fn reconnect_for_auth(&mut self) {
+        for url in std::mem::take(&mut self.auth_pending) {
+            if let Ok(Some(relay)) = self.client.relay(&url).await {
+                // disconnect() only signals the connection task; connecting
+                // again before it has stopped leaves it running, and it
+                // reconnects only on its next retry. Give it a moment.
+                tokio::spawn(async move {
+                    relay.disconnect();
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    relay.connect();
+                });
             }
         }
     }
@@ -1141,6 +1171,8 @@ async fn ask_until_eose(client: &Client, url: &RelayUrl, filter: Filter) -> Opti
         .ok()?;
     let mut evs = Vec::new();
     let mut auth_retried = false;
+    // AUTH may be accepted before the relay closes the REQ that needed it.
+    let mut authed = false;
     let done = loop {
         match notes.next().await {
             Some(RelayNotification::Message { message }) => match *message {
@@ -1159,7 +1191,7 @@ async fn ask_until_eose(client: &Client, url: &RelayUrl, filter: Filter) -> Opti
                         break false;
                     }
                     auth_retried = true;
-                    if !wait_authenticated(&mut notes).await {
+                    if !authed && !wait_authenticated(&mut notes).await {
                         break false;
                     }
                     evs.clear();
@@ -1176,6 +1208,7 @@ async fn ask_until_eose(client: &Client, url: &RelayUrl, filter: Filter) -> Opti
             Some(RelayNotification::RelayStatus { status }) if !status.is_connected() => {
                 break false;
             }
+            Some(RelayNotification::Authenticated) => authed = true,
             Some(_) => {}
             None => break false,
         }
