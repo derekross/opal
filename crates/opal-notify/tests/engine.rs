@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::broadcast;
+
 use nostr_sdk::prelude::*;
 use opal_core::config::NotificationsConfig;
 use opal_core::db::Db;
@@ -707,5 +709,87 @@ async fn unmuting_the_last_private_entry_leaves_nothing_behind() {
     );
     // Unmuting again changes nothing and says so by not failing.
     handle.set_muted(them, false).await.unwrap();
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn muting_keeps_a_long_public_list() {
+    // Real relays take lists this long; the mock's 64 KB cap doesn't.
+    let boot = LocalRelayBuilder::default()
+        .max_event_size(1 << 20)
+        .max_websocket_message_size(1 << 21)
+        .build();
+    boot.run().await.unwrap();
+    let boot_url = boot.url().await;
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let b = connected(&boot_url).await;
+    publish(
+        &b,
+        EventBuilder::new(Kind::RelayList, "")
+            .tag(Tag::parse(["r", boot_url.as_str()]).unwrap())
+            .finalize(&me_keys)
+            .unwrap(),
+    )
+    .await;
+    // More tags than the SDK lets through by default.
+    let many: Vec<PublicKey> = (0..2_500).map(|_| Keys::generate().public_key()).collect();
+    let out = b
+        .send_event(
+            &EventBuilder::new(Kind::MuteList, "")
+                .tags(many.iter().map(|pk| Tag::public_key(*pk)))
+                .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - 60))
+                .finalize(&me_keys)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!out.success.is_empty(), "relay took it: {:?}", out.failed);
+
+    let engine = unlocked_engine(&me_keys, boot_url.as_str()).await;
+    let handle = engine.handle();
+    assert_eq!(handle.mutes().await.len(), 2_500, "a long list is read");
+    let target = Keys::generate().public_key();
+    handle.set_muted(target, true).await.unwrap();
+
+    let mut limits = RelayLimits::default();
+    limits.events = limits
+        .events
+        .set_max_num_tags_per_kind(Kind::MuteList, None);
+    let reader = Client::builder().relay_limits(limits).build();
+    reader.add_relay(&boot_url).await.unwrap();
+    reader.connect().and_wait(Duration::from_secs(3)).await;
+    let ev = newest_mute_list(&reader, me).await;
+    assert_eq!(ev.tags.len(), 2_500, "every public entry kept");
+    assert!(private_tags(&me_keys, &ev).contains(&vec!["p".to_string(), target.to_hex()]));
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn opals_block_list_changes_without_a_restart() {
+    let boot = MockRelay::run().await.unwrap();
+    let boot_url = boot.url().await;
+    let me_keys = Keys::generate();
+    let them = Keys::generate();
+    let engine = unlocked_engine(&me_keys, boot_url.as_str()).await;
+    let mut events = engine.subscribe();
+    let muted = |events: &mut broadcast::Receiver<NotifyEvent>| {
+        let mut events = events.resubscribe();
+        async move {
+            loop {
+                if let Ok(NotifyEvent::Status { status }) = events.recv().await {
+                    return status.muted;
+                }
+            }
+        }
+    };
+    let next = muted(&mut events);
+    engine
+        .handle()
+        .set_blocked(vec![them.public_key().to_hex()]);
+    assert_eq!(next.await, 1);
+    let next = muted(&mut events);
+    engine.handle().set_blocked(vec![]);
+    assert_eq!(next.await, 0);
     engine.stop().await;
 }

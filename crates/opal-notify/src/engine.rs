@@ -112,7 +112,7 @@ pub struct NotifyEngine {
 
 impl NotifyEngine {
     pub fn start(params: NotifyParams) -> Self {
-        let client = Client::default();
+        let client = new_client();
         let (events, _) = broadcast::channel(256);
         let status = Arc::new(RwLock::new(NotifyStatus {
             account: params.account.to_hex(),
@@ -574,7 +574,7 @@ impl Runner {
         let keys = self.keys().await.ok_or(MUTE_NEEDS_UNLOCK)?;
         // Its own client: answers are judged per relay, and waiting for a
         // connection means only the relays asked.
-        let edit = Client::default();
+        let edit = new_client();
         let r = self.edit_mutes(&edit, &keys, target, mute, bootstrap).await;
         edit.shutdown().await;
         let ev = r?;
@@ -694,8 +694,10 @@ impl Runner {
                 private: false,
             })
             .collect();
+        // Only the private entries in effect: the decrypted set may be from
+        // an older list when the newest one can't be read.
         if let Some((_, set)) = &self.private_mutes {
-            let mut private: Vec<&String> = set.iter().collect();
+            let mut private: Vec<&String> = set.intersection(&self.muted).collect();
             private.sort();
             for pk in private {
                 if !out.iter().any(|e| &e.pubkey == pk) {
@@ -916,6 +918,18 @@ impl Runner {
     }
 }
 
+/// The SDK drops events with more than 2,000 tags without a word (the
+/// relay's EOSE still arrives), so a long mute list would look like none.
+/// Lift that for your own lists; everything else keeps the defaults.
+fn new_client() -> Client {
+    let mut limits = RelayLimits::default();
+    limits.events = limits
+        .events
+        .set_max_num_tags_per_kind(Kind::MuteList, None)
+        .set_max_num_tags_per_kind(Kind::RelayList, None);
+    Client::builder().relay_limits(limits).build()
+}
+
 /// The newest mute list, read carefully enough to publish over. Your
 /// newest relay list must be found (following it to its own relays), and
 /// most of its write relays must finish answering.
@@ -1020,6 +1034,9 @@ async fn fetch_each(
         .collect()
 }
 
+/// Relies on the default `verify_subscriptions: false`: with it on, the SDK
+/// would drop every EVENT for this REQ id it didn't register itself, which
+/// would also look like "EOSE, nothing there".
 async fn ask_until_eose(client: &Client, url: &RelayUrl, filter: Filter) -> Option<Vec<Event>> {
     client.add_relay(url).await.ok()?;
     let relay = client.relay(url).await.ok()??;
