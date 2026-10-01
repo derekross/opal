@@ -793,3 +793,45 @@ async fn opals_block_list_changes_without_a_restart() {
     assert_eq!(next.await, 0);
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn muting_works_on_relays_that_require_auth() {
+    // Like a Haven outbox: AUTH to read and to write.
+    let relay = LocalRelayBuilder::default()
+        .nip42(LocalRelayBuilderNip42::read_and_write())
+        .build();
+    relay.run().await.unwrap();
+    let url = relay.url().await;
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let mine = Client::builder()
+        .authenticator(SignerAuthenticator::new(me_keys.clone()))
+        .build();
+    mine.add_relay(&url).await.unwrap();
+    mine.connect().and_wait(Duration::from_secs(3)).await;
+    publish(
+        &mine,
+        EventBuilder::new(Kind::RelayList, "")
+            .tag(Tag::parse(["r", url.as_str()]).unwrap())
+            .finalize(&me_keys)
+            .unwrap(),
+    )
+    .await;
+    let kept = Keys::generate().public_key();
+    publish(
+        &mine,
+        private_list(&me_keys, &[kept], Timestamp::now().as_secs() - 60),
+    )
+    .await;
+
+    let engine = unlocked_engine(&me_keys, url.as_str()).await;
+    let target = Keys::generate().public_key();
+    engine.handle().set_muted(target, true).await.unwrap();
+    let private = private_tags(&me_keys, &newest_mute_list(&mine, me).await);
+    assert!(
+        private.contains(&vec!["p".to_string(), kept.to_hex()]),
+        "{private:?}"
+    );
+    assert!(private.contains(&vec!["p".to_string(), target.to_hex()]));
+    engine.stop().await;
+}

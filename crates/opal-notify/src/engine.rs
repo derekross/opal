@@ -112,7 +112,7 @@ pub struct NotifyEngine {
 
 impl NotifyEngine {
     pub fn start(params: NotifyParams) -> Self {
-        let client = new_client();
+        let client = new_client(None);
         let (events, _) = broadcast::channel(256);
         let status = Arc::new(RwLock::new(NotifyStatus {
             account: params.account.to_hex(),
@@ -574,7 +574,7 @@ impl Runner {
         let keys = self.keys().await.ok_or(MUTE_NEEDS_UNLOCK)?;
         // Its own client: answers are judged per relay, and waiting for a
         // connection means only the relays asked.
-        let edit = new_client();
+        let edit = new_client(Some(keys.clone()));
         let r = self.edit_mutes(&edit, &keys, target, mute, bootstrap).await;
         edit.shutdown().await;
         let ev = r?;
@@ -921,13 +921,22 @@ impl Runner {
 /// The SDK drops events with more than 2,000 tags without a word (the
 /// relay's EOSE still arrives), so a long mute list would look like none.
 /// Lift that for your own lists; everything else keeps the defaults.
-fn new_client() -> Client {
+///
+/// With `keys`, it answers NIP-42 AUTH: outbox relays such as Haven only
+/// take your lists from you, and some relays only serve them to you.
+fn new_client(keys: Option<Keys>) -> Client {
     let mut limits = RelayLimits::default();
     limits.events = limits
         .events
         .set_max_num_tags_per_kind(Kind::MuteList, None)
         .set_max_num_tags_per_kind(Kind::RelayList, None);
-    Client::builder().relay_limits(limits).build()
+    let builder = Client::builder().relay_limits(limits);
+    match keys {
+        Some(keys) => builder
+            .authenticator(SignerAuthenticator::new(keys))
+            .build(),
+        None => builder.build(),
+    }
 }
 
 /// The newest mute list, read carefully enough to publish over. Your
@@ -1044,10 +1053,11 @@ async fn ask_until_eose(client: &Client, url: &RelayUrl, filter: Filter) -> Opti
     let mut notes = relay.notifications();
     let id = SubscriptionId::generate();
     relay
-        .send_msg(ClientMessage::req(id.clone(), vec![filter]))
+        .send_msg(ClientMessage::req(id.clone(), vec![filter.clone()]))
         .await
         .ok()?;
     let mut evs = Vec::new();
+    let mut auth_retried = false;
     let done = loop {
         match notes.next().await {
             Some(RelayNotification::Message { message }) => match *message {
@@ -1056,9 +1066,28 @@ async fn ask_until_eose(client: &Client, url: &RelayUrl, filter: Filter) -> Opti
                     event,
                 } if *subscription_id == id => evs.push(event.into_owned()),
                 RelayMessage::EndOfStoredEvents(sid) if *sid == id => break true,
+                // Answer AUTH once and ask again; the SDK only does that for
+                // subscriptions it made itself.
                 RelayMessage::Closed {
-                    subscription_id, ..
-                } if *subscription_id == id => break false,
+                    subscription_id,
+                    message,
+                } if *subscription_id == id => {
+                    if auth_retried || !message.starts_with("auth-required:") {
+                        break false;
+                    }
+                    auth_retried = true;
+                    if !wait_authenticated(&mut notes).await {
+                        break false;
+                    }
+                    evs.clear();
+                    if relay
+                        .send_msg(ClientMessage::req(id.clone(), vec![filter.clone()]))
+                        .await
+                        .is_err()
+                    {
+                        break false;
+                    }
+                }
                 _ => {}
             },
             Some(RelayNotification::RelayStatus { status }) if !status.is_connected() => {
@@ -1070,6 +1099,23 @@ async fn ask_until_eose(client: &Client, url: &RelayUrl, filter: Filter) -> Opti
     };
     let _ = relay.send_msg(ClientMessage::close(id)).await;
     done.then_some(evs)
+}
+
+/// Wait for the relay to accept our AUTH (the client answers the challenge
+/// on its own when it has keys).
+async fn wait_authenticated(
+    notes: &mut (impl futures::Stream<Item = RelayNotification> + Unpin),
+) -> bool {
+    loop {
+        match notes.next().await {
+            Some(RelayNotification::Authenticated) => return true,
+            Some(RelayNotification::AuthenticationFailed) | None => return false,
+            Some(RelayNotification::RelayStatus { status }) if !status.is_connected() => {
+                return false;
+            }
+            Some(_) => {}
+        }
+    }
 }
 
 /// See [`Runner::fetch_for_edit`].
