@@ -305,6 +305,14 @@ async fn muting_from_opal_keeps_the_rest_of_the_list() {
     let private_one = Keys::generate().public_key();
     let target = Keys::generate();
 
+    publish(
+        &publisher,
+        EventBuilder::new(Kind::RelayList, "")
+            .tag(Tag::parse(["r", url.as_str()]).unwrap())
+            .finalize(&me_keys)
+            .unwrap(),
+    )
+    .await;
     // Written by another client: a public entry, a hashtag, a private entry.
     let private = serde_json::to_string(&vec![
         vec!["p".to_string(), private_one.to_hex()],
@@ -395,5 +403,147 @@ async fn muting_from_opal_keeps_the_rest_of_the_list() {
     publish(&publisher, unreadable.clone()).await;
     assert!(handle.set_muted(target.public_key(), true).await.is_err());
     assert_eq!(newest_mute_list(&publisher, me).await.id, unreadable.id);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn muting_with_no_relay_answering_publishes_nothing() {
+    let me_keys = Keys::generate();
+    let vault = Arc::new(Vault::with_log_n(SecretStore::memory(), 4));
+    vault.add_account(me_keys.clone(), "pw").await.unwrap();
+    vault.unlock("pw").await.unwrap();
+    let engine = NotifyEngine::start(NotifyParams {
+        account: me_keys.public_key(),
+        config: NotificationsConfig {
+            // Nothing listens here, so the fetch comes back empty.
+            bootstrap_relays: vec!["ws://127.0.0.1:9".to_string()],
+            ..Default::default()
+        },
+        store: NotifyStore::new(Db::open_in_memory().unwrap()).unwrap(),
+        vault: Some(vault),
+    });
+    let r = engine
+        .handle()
+        .set_muted(Keys::generate().public_key(), true)
+        .await;
+    assert!(
+        r.as_ref().is_err_and(|e| e.contains("couldn't confirm")),
+        "{r:?}"
+    );
+    engine.stop().await;
+}
+
+/// An engine for `me` with `bootstrap` as its only bootstrap relay, unlocked.
+async fn unlocked_engine(me_keys: &Keys, bootstrap: &str) -> NotifyEngine {
+    let vault = Arc::new(Vault::with_log_n(SecretStore::memory(), 4));
+    vault.add_account(me_keys.clone(), "pw").await.unwrap();
+    vault.unlock("pw").await.unwrap();
+    let engine = NotifyEngine::start(NotifyParams {
+        account: me_keys.public_key(),
+        config: NotificationsConfig {
+            bootstrap_relays: vec![bootstrap.to_string()],
+            ..Default::default()
+        },
+        store: NotifyStore::new(Db::open_in_memory().unwrap()).unwrap(),
+        vault: Some(vault),
+    });
+    let mut events = engine.subscribe();
+    while !matches!(events.recv().await, Ok(NotifyEvent::Status { .. })) {}
+    engine
+}
+
+async fn connected(url: &RelayUrl) -> Client {
+    let c = Client::default();
+    c.add_relay(url).await.unwrap();
+    c.connect().and_wait(Duration::from_secs(3)).await;
+    c
+}
+
+fn private_list(keys: &Keys, entries: &[PublicKey], at: u64) -> Event {
+    let tags: Vec<Vec<String>> = entries
+        .iter()
+        .map(|p| vec!["p".to_string(), p.to_hex()])
+        .collect();
+    let content = nip44::encrypt(
+        keys.secret_key(),
+        &keys.public_key(),
+        serde_json::to_string(&tags).unwrap(),
+        nip44::Version::V2,
+    )
+    .unwrap();
+    EventBuilder::new(Kind::MuteList, content)
+        .custom_created_at(Timestamp::from(at))
+        .finalize(keys)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn muting_builds_on_the_list_your_write_relays_have() {
+    // Bootstrap holds your relay list and an old copy of your mutes; the
+    // current list lives only on your write relay.
+    let boot = MockRelay::run().await.unwrap();
+    let boot_url = boot.url().await;
+    let outbox = MockRelay::run().await.unwrap();
+    let outbox_url = outbox.url().await;
+    let me_keys = Keys::generate();
+    let me = me_keys.public_key();
+    let old_one = Keys::generate().public_key();
+    let new_one = Keys::generate().public_key();
+    let target = Keys::generate().public_key();
+    let now = Timestamp::now().as_secs();
+
+    let b = connected(&boot_url).await;
+    publish(
+        &b,
+        EventBuilder::new(Kind::RelayList, "")
+            .tag(Tag::parse(["r", outbox_url.as_str(), "write"]).unwrap())
+            .finalize(&me_keys)
+            .unwrap(),
+    )
+    .await;
+    publish(&b, private_list(&me_keys, &[old_one], now - 100)).await;
+    let o = connected(&outbox_url).await;
+    publish(&o, private_list(&me_keys, &[old_one, new_one], now - 10)).await;
+
+    let engine = unlocked_engine(&me_keys, boot_url.as_str()).await;
+    engine.handle().set_muted(target, true).await.unwrap();
+    let ev = newest_mute_list(&o, me).await;
+    let private = private_tags(&me_keys, &ev);
+    for pk in [old_one, new_one, target] {
+        assert!(
+            private.contains(&vec!["p".to_string(), pk.to_hex()]),
+            "{pk} kept: {private:?}"
+        );
+    }
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn muting_with_your_write_relays_down_publishes_nothing() {
+    let boot = MockRelay::run().await.unwrap();
+    let boot_url = boot.url().await;
+    let me_keys = Keys::generate();
+    let b = connected(&boot_url).await;
+    publish(
+        &b,
+        EventBuilder::new(Kind::RelayList, "")
+            .tag(Tag::parse(["r", "ws://127.0.0.1:9", "write"]).unwrap())
+            .finalize(&me_keys)
+            .unwrap(),
+    )
+    .await;
+    let old = private_list(&me_keys, &[Keys::generate().public_key()], 1_700_000_000);
+    publish(&b, old.clone()).await;
+
+    let engine = unlocked_engine(&me_keys, boot_url.as_str()).await;
+    let r = engine
+        .handle()
+        .set_muted(Keys::generate().public_key(), true)
+        .await;
+    assert!(
+        r.as_ref().is_err_and(|e| e.contains("couldn't confirm")),
+        "{r:?}"
+    );
+    assert_eq!(newest_mute_list(&b, me_keys.public_key()).await.id, old.id);
     engine.stop().await;
 }

@@ -28,6 +28,12 @@ Column {
   readonly property var items: {
     var all = svc ? svc.notifications : []
     if (svc && !svc.canReadDms) all = all.filter(function(n) { return n.type !== "dm" })
+    if (filter !== "all") all = all.filter(function(n) {
+      if (filter === "replies") return n.type === "reply" || n.type === "mention"
+      if (filter === "zaps") return n.type === "zap"
+      if (filter === "dms") return n.type === "dm"
+      return true
+    })
     // Someone being muted keeps one row, for the undo bar.
     var pending = svc ? svc.pendingMutes : ({})
     var kept = {}
@@ -37,13 +43,7 @@ Column {
       kept[n.author] = true
       return true
     })
-    if (filter === "all") return all
-    return all.filter(function(n) {
-      if (filter === "replies") return n.type === "reply" || n.type === "mention"
-      if (filter === "zaps") return n.type === "zap"
-      if (filter === "dms") return n.type === "dm"
-      return true
-    })
+    return all
   }
   readonly property var st: svc && svc.notifyStatus ? svc.notifyStatus : ({})
 

@@ -177,8 +177,10 @@ impl NotifyHandle {
                 reply,
             })
             .map_err(|_| "notifications aren't running".to_string())?;
-        rx.await
-            .map_err(|_| "notifications aren't running".to_string())?
+        rx.await.map_err(|_| {
+            "notifications restarted while your mute list was being saved; check Settings to see if it was"
+                .to_string()
+        })?
     }
 
     /// The people on your mute list that Opal can read.
@@ -529,18 +531,30 @@ impl Runner {
         bootstrap: &[RelayUrl],
     ) -> Result<(), String> {
         let keys = self.keys().await.ok_or(MUTE_NEEDS_UNLOCK)?;
-        let lists = self
-            .fetch_lists(bootstrap)
-            .await
-            .ok_or("couldn't reach your relays to read your mute list")?;
-        let current = match (lists.mute_event, self.mute_event.clone()) {
+        let found = self.fetch_for_edit(bootstrap).await?;
+        let current = match (found.mute_event, self.mute_event.clone()) {
             (Some(a), Some(b)) => Some(if a.created_at >= b.created_at { a } else { b }),
             (a, b) => a.or(b),
         };
+        // Nothing found, yet Opal has decrypted a list before: it exists somewhere.
+        if current.is_none() && self.private_mutes.is_some() {
+            return Err(UNSURE.into());
+        }
+        if let Some(ev) = &current
+            && ev.created_at.as_secs() > Timestamp::now().as_secs() + 600
+        {
+            return Err(
+                "your mute list is dated in the future, so relays would refuse a newer one".into(),
+            );
+        }
         let mut public: Vec<Tag> = vec![];
         let mut private: Vec<Vec<String>> = vec![];
+        // Keep NIP-04 for lists written that way, so clients that only read
+        // NIP-04 don't lose the private part.
+        let mut legacy = false;
         if let Some(ev) = &current {
             public = ev.tags.iter().cloned().collect();
+            legacy = ev.content.contains("?iv=");
             if !ev.content.is_empty() {
                 private = decrypt_private(&keys, &self.me, &ev.content).ok_or(
                     "couldn't read the private part of your mute list, so it was left unchanged",
@@ -565,8 +579,12 @@ impl Runner {
             String::new()
         } else {
             let json = serde_json::to_string(&private).map_err(|e| e.to_string())?;
-            nip44::encrypt(keys.secret_key(), &self.me, json, nip44::Version::V2)
-                .map_err(|e| e.to_string())?
+            if legacy {
+                nip04::encrypt(keys.secret_key(), &self.me, json).map_err(|e| e.to_string())?
+            } else {
+                nip44::encrypt(keys.secret_key(), &self.me, json, nip44::Version::V2)
+                    .map_err(|e| e.to_string())?
+            }
         };
         // Strictly newer than the list it replaces, or relays keep the old one.
         let mut created = Timestamp::now();
@@ -580,16 +598,12 @@ impl Runner {
             .custom_created_at(created)
             .finalize(&keys)
             .map_err(|e| e.to_string())?;
-        let mut relays: Vec<RelayUrl> = lists.write.clone();
+        let mut relays: Vec<RelayUrl> = found.write;
         for r in bootstrap {
             if !relays.contains(r) {
                 relays.push(r.clone());
             }
         }
-        for r in &relays {
-            let _ = self.client.add_relay(r).await;
-        }
-        self.client.connect().and_wait(CONNECT_WAIT).await;
         match self.client.send_event(&ev).to(relays).await {
             Ok(out) if !out.success.is_empty() => {}
             Ok(out) => {
@@ -602,6 +616,85 @@ impl Runner {
         }
         self.apply_mutes(Some(&ev)).await;
         Ok(())
+    }
+
+    /// The newest mute list, read carefully enough to publish over: your
+    /// relay list must be found and one of your write relays must hand
+    /// back something of yours. Each relay is asked on its own, because a
+    /// relay that times out looks just like one that has nothing.
+    async fn fetch_for_edit(&self, bootstrap: &[RelayUrl]) -> Result<Found, String> {
+        let filter =
+            Filter::new()
+                .author(self.me)
+                .kinds([Kind::Metadata, Kind::RelayList, Kind::MuteList]);
+        let mut answers = self.fetch_each(bootstrap, &filter).await;
+        let newest = |answers: &[(RelayUrl, Vec<Event>)], kind: Kind| {
+            answers
+                .iter()
+                .flat_map(|(_, evs)| evs)
+                .filter(|e| e.kind == kind)
+                .max_by_key(|e| e.created_at)
+                .cloned()
+        };
+        let Some(relay_list) = newest(&answers, Kind::RelayList) else {
+            return Err(UNSURE.into());
+        };
+        let mut write = Vec::new();
+        let mut others = Vec::new();
+        for (url, meta) in nip65::extract_relay_list(&relay_list) {
+            if meta.is_none() || meta == Some(RelayMetadata::Write) {
+                write.push(url.clone());
+            }
+            if !bootstrap.contains(&url) {
+                others.push(url.clone());
+            }
+        }
+        answers.extend(self.fetch_each(&others, &filter).await);
+        let write_answered = answers
+            .iter()
+            .any(|(url, evs)| write.contains(url) && !evs.is_empty());
+        if !write_answered {
+            return Err(UNSURE.into());
+        }
+        Ok(Found {
+            mute_event: newest(&answers, Kind::MuteList),
+            write,
+        })
+    }
+
+    /// Ask each relay separately; only events by you count.
+    async fn fetch_each(
+        &self,
+        relays: &[RelayUrl],
+        filter: &Filter,
+    ) -> Vec<(RelayUrl, Vec<Event>)> {
+        for r in relays {
+            let _ = self.client.add_relay(r).await;
+        }
+        self.client.connect().and_wait(CONNECT_WAIT).await;
+        let asks = relays.iter().map(|url| {
+            let client = self.client.clone();
+            let filter = filter.clone();
+            let url = url.clone();
+            let me = self.me;
+            async move {
+                let evs = match client.relay(&url).await {
+                    Ok(Some(relay)) => relay
+                        .fetch_events(filter)
+                        .timeout(FETCH_TIMEOUT)
+                        .await
+                        .map(|evs| {
+                            evs.into_iter()
+                                .filter(|e| e.pubkey == me && e.verify().is_ok())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => vec![],
+                };
+                (url, evs)
+            }
+        });
+        futures::future::join_all(asks).await
     }
 
     fn mute_entries(&self) -> Vec<MutedEntry> {
@@ -835,6 +928,15 @@ impl Runner {
             }
         }
     }
+}
+
+const UNSURE: &str =
+    "couldn't confirm your current mute list with your relays, so it was left unchanged";
+
+/// See [`Runner::fetch_for_edit`].
+struct Found {
+    mute_event: Option<Event>,
+    write: Vec<RelayUrl>,
 }
 
 /// What the keyring holds for [`ItemKind::MuteCache`].

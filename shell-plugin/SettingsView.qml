@@ -382,6 +382,9 @@ Column {
           }
           PanelActionButton {
             id: unmuteButton
+            // Your Nostr list can only be changed with the key.
+            visible: modelData.list === "opal" || (!!root.svc && root.svc.canReadDms)
+            width: visible ? implicitWidth : 0
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             iconText: "󰕾"

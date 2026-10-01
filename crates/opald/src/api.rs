@@ -1040,53 +1040,74 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             }
             let p: P = parse(params)?;
             let target = PublicKey::parse(&p.pubkey)?;
+            let hex = target.to_hex();
             let mute = method == "notifications.mute";
             let handle = notify_handle(app).await;
-            // Opal's own list: where mutes go without a key, and the first
-            // place an unmute looks.
-            let hex = target.to_hex();
-            let was_blocked = {
-                let mut cfg = app.config.write().await;
-                let had = cfg
-                    .notifications
-                    .blocked
-                    .iter()
-                    .any(|b| PublicKey::parse(b).is_ok_and(|pk| pk == target));
-                if !mute && had {
-                    cfg.notifications
-                        .blocked
-                        .retain(|b| PublicKey::parse(b).is_ok_and(|pk| pk != target));
-                    cfg.save_to(&app.config_path)?;
-                }
-                had
-            };
-            let Some((handle, local)) = handle else {
-                return Err(anyhow!("notifications are off"));
-            };
-            let on_list = handle.mutes().await.iter().any(|e| e.pubkey == hex);
-            if !local || (!mute && !on_list) {
-                if mute && !was_blocked {
-                    let mut cfg = app.config.write().await;
-                    cfg.notifications.blocked.push(hex);
-                    cfg.save_to(&app.config_path)?;
-                }
-                crate::modules::reconcile(app).await;
-                return Ok(json!({"ok": true, "list": "opal"}));
-            }
-            let mut r = handle.set_muted(target, mute).await;
-            if matches!(&r, Err(e) if e == opal_notify::MUTE_NEEDS_UNLOCK)
-                && let Some(pass) = &p.passphrase
+            let blocked = app
+                .config
+                .read()
+                .await
+                .notifications
+                .blocked
+                .iter()
+                .any(|b| PublicKey::parse(b).is_ok_and(|pk| pk == target));
+
+            // Your Nostr mute list, when the key is here. Unmuting always
+            // asks it (it reads the current list), unless the person is
+            // only on Opal's own list.
+            let mut list = "opal";
+            if let Some((handle, true)) = &handle
+                && (mute || !blocked || handle.mutes().await.iter().any(|e| e.pubkey == hex))
             {
-                app.vault.unlock(pass).await?;
-                app.touch().await;
-                app.emit_state().await;
-                r = handle.set_muted(target, mute).await;
+                let mut r = handle.set_muted(target, mute).await;
+                if matches!(&r, Err(e) if e == opal_notify::MUTE_NEEDS_UNLOCK)
+                    && let Some(pass) = &p.passphrase
+                {
+                    app.vault.unlock(pass).await?;
+                    app.touch().await;
+                    app.emit_state().await;
+                    r = handle.set_muted(target, mute).await;
+                }
+                r.map_err(|e| anyhow!("{e}"))?;
+                list = "nostr";
+            } else if !mute
+                && let Some((handle, false)) = &handle
+                && handle.mutes().await.iter().any(|e| e.pubkey == hex)
+            {
+                return Err(anyhow!(
+                    "they're on your Nostr mute list, which can only be changed with your key"
+                ));
             }
-            r.map_err(|e| anyhow!("{e}"))?;
-            if was_blocked {
+
+            // Opal's own list: where mutes go without a key, and where an
+            // unmute also takes them off.
+            let changed = {
+                let mut cfg = app.config.write().await;
+                let b = &mut cfg.notifications.blocked;
+                let had = b
+                    .iter()
+                    .any(|x| PublicKey::parse(x).is_ok_and(|pk| pk == target));
+                let changed = if mute && list == "opal" && !had {
+                    b.push(hex.clone());
+                    true
+                } else if !mute && had {
+                    b.retain(|x| !PublicKey::parse(x).is_ok_and(|pk| pk == target));
+                    true
+                } else {
+                    false
+                };
+                if changed {
+                    cfg.save_to(&app.config_path)?;
+                }
+                changed
+            };
+            if changed {
+                if mute && let Some(account) = notify_account(app).await {
+                    let _ = app.notify_store.remove_authors(&account, &[hex]);
+                }
                 crate::modules::reconcile(app).await;
             }
-            Ok(json!({"ok": true, "list": "nostr"}))
+            Ok(json!({"ok": true, "list": list}))
         }
         "notifications.mutes" => {
             let mut out = Vec::new();

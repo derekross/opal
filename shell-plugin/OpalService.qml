@@ -121,8 +121,7 @@ Item {
     call(method, params, function(err, result) {
       if (!err) { if (onOk) onOk(result); return }
       if (err.indexOf("passphrase") !== -1) {
-        root.guardError = ""
-        root.guarded = { method: method, params: params || {}, onOk: onOk, why: why || "Confirm with your Opal passphrase" }
+        root.setGuarded({ method: method, params: params || {}, onOk: onOk, why: why || "Confirm with your Opal passphrase" })
       } else {
         root.message(err, true)
       }
@@ -144,6 +143,14 @@ Item {
         if (g.onOk) g.onOk(result)
       })
     })
+  }
+
+  // One card at a time: a new request cancels the one it replaces.
+  function setGuarded(g) {
+    var old = guarded
+    guardError = ""
+    guarded = g
+    if (old && old.onCancel) old.onCancel()
   }
 
   function cancelGuarded() {
@@ -220,8 +227,9 @@ Item {
   function _commitMute(pubkey) {
     var m = pendingMutes[pubkey]
     if (!m || m.committing) return
-    m.committing = true
-    pendingMutes = Object.assign({}, pendingMutes)
+    var p = Object.assign({}, pendingMutes)
+    p[pubkey] = Object.assign({}, m, { committing: true })
+    pendingMutes = p
     var done = function(r) {
       root.undoMute(pubkey)
       root.message(r && r.list === "opal"
@@ -232,10 +240,9 @@ Item {
     call("notifications.mute", { pubkey: pubkey }, function(err, r) {
       if (!err) { done(r); return }
       if (err.indexOf("passphrase") !== -1) {
-        root.guardError = ""
-        root.guarded = { method: "notifications.mute", params: { pubkey: pubkey }, onOk: done,
+        root.setGuarded({ method: "notifications.mute", params: { pubkey: pubkey }, onOk: done,
           onCancel: function() { root.undoMute(pubkey) },
-          why: "Mute " + m.name + ": confirm with your Opal passphrase" }
+          why: "Mute " + m.name + ": confirm with your Opal passphrase" })
       } else {
         root.undoMute(pubkey)
         root.message(err, true)
@@ -247,6 +254,8 @@ Item {
       root.message("Unmuted " + name, false)
       root.refreshNotifications()
     }, "Unmute " + name + ": confirm with your Opal passphrase")
+    // An error may leave things changed (a restart mid-save): re-read.
+    Qt.callLater(refreshMutes)
   }
   Timer {
     id: muteTimer
