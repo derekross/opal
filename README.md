@@ -154,7 +154,7 @@ opal account add [--generate]        # import (asks for the key) or create
 opal bunker --qr                     # single-use bunker:// login for an app
 opal connect 'nostrconnect://…'      # hand a link to the panel for approval
 opal prompts / opal approve <id> --remember 1h / opal deny <id>
-opal apps / opal revoke <id> / opal log
+opal apps / opal rename <id> <name> / opal revoke <id> / opal log
 opal inbox [--read]                  # notifications
 opal watch derekross@grownostr.org   # read-only profile
 opal set-status "At Nostrville" --for 4h / opal clear-status
