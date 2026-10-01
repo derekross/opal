@@ -31,7 +31,18 @@ Column {
     svc.call("apps.get", { id: selectedId }, function(err, r) {
       if (err) { root.selectedId = ""; root.detail = null; return }
       root.detail = r
+      // Show the app's current name; leave the field alone while it is
+      // being edited.
+      if (!nameField.activeFocus) nameField.text = (r && r.app && r.app.display_name) || ""
     })
+  }
+  function renameApp(name) {
+    var n = (name || "").trim()
+    if (!n) { svc.message("Enter an app name", true); return }
+    svc.runGuarded("apps.update", { id: root.selectedId, name: n }, function() {
+      root.svc.refreshApps()
+      root.loadDetail()
+    }, "Sign in to rename this app.")
   }
   function createBunker() {
     svc.run("apps.create_bunker", { name: bunkerName.text.trim() || null, unused_ttl_secs: 3600 }, function(r) {
@@ -301,6 +312,30 @@ Column {
         parts.push(a.connected ? "connected" : "not connected yet")
         parts.push("relays: " + (a.relays || []).join(", "))
         return parts.join(" · ")
+      }
+    }
+
+    PanelSectionHeader { text: "NAME"; foreground: root.dim }
+    Row {
+      width: parent.width
+      spacing: Style.space(8)
+      TextField {
+        id: nameField
+        width: parent.width - saveName.width - parent.spacing
+        placeholderText: "App name"
+        foreground: root.foreground
+        onAccepted: root.renameApp(nameField.text)
+        Keys.onEscapePressed: focus = false
+      }
+      Button {
+        id: saveName
+        anchors.verticalCenter: nameField.verticalCenter
+        text: "Save"
+        iconText: "󰄬"
+        bordered: true
+        foreground: root.foreground
+        tooltipText: "Change the name shown for this app"
+        onClicked: root.renameApp(nameField.text)
       }
     }
 

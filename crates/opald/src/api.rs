@@ -2025,6 +2025,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apps_update_renames_without_a_passphrase_but_needs_the_ui_session() {
+        let (app, _) = test_app().await;
+        let exe = "/x/peridotd";
+        let _token = pair(&app, exe, "basic", vec![]).await;
+        // A bunker connection too: a remote app is stored differently from
+        // a local one, and both go through this method.
+        let remote = call(
+            &app,
+            &ui(),
+            "apps.create_bunker",
+            json!({"name": "Peridot Remote"}),
+        )
+        .await
+        .unwrap();
+        let remote_id = remote["app"]["id"].as_str().unwrap().to_string();
+        let local_id = call(&app, &ui(), "apps.list", json!(null))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == json!("local"))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Privileged: a connection that hasn't shown the UI token can't
+        // rename, even though a name alone needs no passphrase.
+        for id in [local_id.clone(), remote_id.clone()] {
+            let err = call(
+                &app,
+                &Peer::default(),
+                "apps.update",
+                json!({"id": id, "name": "Nope"}),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert_eq!(err, NEEDS_UI, "{id}");
+        }
+
+        // A name alone changes the display name and nothing else.
+        for id in [local_id.clone(), remote_id.clone()] {
+            let before = call(&app, &ui(), "apps.get", json!({"id": id}))
+                .await
+                .unwrap()["app"]["policy"]
+                .clone();
+            let r = call(
+                &app,
+                &ui(),
+                "apps.update",
+                json!({"id": id, "name": "Renamed"}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(r["display_name"], json!("Renamed"));
+            assert_eq!(r["policy"], before);
+        }
+
+        // Full trust still asks for the passphrase.
+        let err = call(
+            &app,
+            &ui(),
+            "apps.update",
+            json!({"id": local_id, "policy": "full-trust"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(err, "this change needs your Opal passphrase");
+    }
+
+    #[tokio::test]
     async fn sensitive_kind_prompts_through_the_prompt_hub() {
         let (app, pk) = test_app().await;
         let exe = "/x/peridotd";

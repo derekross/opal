@@ -64,6 +64,8 @@ enum Cmd {
     },
     /// List connected apps, or show one.
     Apps { id: Option<String> },
+    /// Change an app's name (shown in the panel).
+    Rename { id: String, name: String },
     /// Disconnect and forget an app.
     Revoke { id: String },
     /// List requests waiting for a decision.
@@ -337,6 +339,15 @@ async fn run() -> Result<()> {
             }
         }
         Cmd::Apps { id: Some(id) } => out(&c.call("apps.get", json!({"id": id})).await?),
+        Cmd::Rename { id, name } => {
+            let r = c
+                .call("apps.update", json!({"id": id, "name": name}))
+                .await?;
+            println!(
+                "Renamed to {}.",
+                r["display_name"].as_str().unwrap_or_default()
+            );
+        }
         Cmd::Revoke { id } => {
             let r = c.call("apps.remove", json!({"id": id})).await?;
             println!(
