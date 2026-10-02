@@ -307,13 +307,32 @@ Item {
     if (shell && typeof shell.hide === "function") shell.hide(pluginId)
   }
 
-  function copy(text, what) {
-    Quickshell.execDetached(["wl-copy", "--", text])
-    message((what || "Copied") + " to the clipboard", false)
+  // Over stdin, never argv: what's copied can be a credential (a bunker
+  // link's secret, an encrypted key backup), and any user can read a
+  // process's command line in /proc.
+  Component {
+    id: clipboardWriter
+    Process {
+      property string text: ""
+      command: ["wl-copy"]
+      stdinEnabled: true
+      onStarted: {
+        write(text)
+        text = ""
+        stdinEnabled = false
+      }
+      onExited: destroy()
+    }
   }
 
-  function notify(headline, body) {
-    Quickshell.execDetached(["omarchy-notification-send", "--app-name", "Opal", "-g", "󰌾", headline, body || ""])
+  function copy(text, what) {
+    var p = clipboardWriter.createObject(root, { text: text })
+    if (!p) {
+      message("Couldn't copy to the clipboard", true)
+      return
+    }
+    p.running = true
+    message((what || "Copied") + " to the clipboard", false)
   }
 
   function handle(msg) {

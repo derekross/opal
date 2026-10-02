@@ -1,7 +1,9 @@
 //! Desktop notifications. The panel and approval dialog are the main UI; these
-//! make sure a waiting request isn't missed while you're elsewhere. On Omarchy
-//! they go through `omarchy-notification-send` (clicking opens the approval
-//! dialog); elsewhere through `notify-send`.
+//! make sure a waiting request isn't missed while you're elsewhere. They go
+//! straight to the notification server over D-Bus, with the hints Omarchy's
+//! `omarchy-notification-send` sets (glyph, image, what a click runs), and
+//! never through a helper's command line: any user can read those in /proc,
+//! and the text can be a private message.
 //!
 //! Everything shown comes partly from strangers (names, note text), so it is
 //! sanitized: no leading dashes (they'd be read as options), no markup, no
@@ -88,45 +90,61 @@ fn openable(url: &str) -> bool {
 async fn send(headline: &str, body: &str, click: Click, image: Option<&std::path::Path>) {
     let headline = clean(headline, 80);
     let body = clean(body, 240);
-    let mut cmd;
-    if which("omarchy-notification-send") {
-        cmd = tokio::process::Command::new("omarchy-notification-send");
-        cmd.args(["--app-name", "Opal", "-g", GLYPH, "-t", "12000"]);
-        if let Some(img) = image {
-            cmd.arg("--image").arg(img);
-        }
-        cmd.args([headline.as_str(), body.as_str()]);
-        match click {
-            Click::Approvals => cmd.args(["--exec", "omarchy-shell", "opal", "approvals"]),
-            Click::Inbox => cmd.args(["--exec", "omarchy-shell", "opal", "notifications"]),
-            Click::Url(u) => cmd.args([
-                "--exec",
-                "systemd-run",
-                "--user",
-                "--quiet",
-                "--collect",
-                "--",
-                "xdg-open",
-                &u,
-            ]),
-        };
-    } else {
-        cmd = tokio::process::Command::new("notify-send");
-        cmd.args(["--app-name=Opal", "--expire-time=12000"]);
-        if let Some(img) = image {
-            cmd.arg(format!("--icon={}", img.display()));
-        }
-        cmd.args(["--", headline.as_str(), body.as_str()]);
+    if let Err(e) = notify_dbus(&headline, &body, click, image).await {
+        tracing::debug!("sending a notification failed: {e}");
     }
-    // Don't wait: with --exec the sender blocks until the popup is closed.
-    match cmd.kill_on_drop(false).spawn() {
-        Ok(mut child) => {
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-            });
-        }
-        Err(e) => tracing::debug!("sending a notification failed: {e}"),
+}
+
+async fn notify_dbus(
+    headline: &str,
+    body: &str,
+    click: Click,
+    image: Option<&std::path::Path>,
+) -> zbus::Result<()> {
+    use zbus::zvariant::Value;
+    static SESSION: tokio::sync::OnceCell<zbus::Connection> = tokio::sync::OnceCell::const_new();
+    let conn = SESSION.get_or_try_init(zbus::Connection::session).await?;
+    // What a click runs, as Omarchy's notification server expects it: an
+    // argv as JSON, never a shell string.
+    let exec: Vec<String> = match click {
+        Click::Approvals => vec!["omarchy-shell".into(), "opal".into(), "approvals".into()],
+        Click::Inbox => vec![
+            "omarchy-shell".into(),
+            "opal".into(),
+            "notifications".into(),
+        ],
+        Click::Url(u) => [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--collect",
+            "--",
+            "xdg-open",
+        ]
+        .into_iter()
+        .map(String::from)
+        .chain([u])
+        .collect(),
+    };
+    let exec = serde_json::to_string(&exec).unwrap_or_default();
+    let mut hints: HashMap<&str, Value> = HashMap::new();
+    hints.insert("urgency", Value::from(0u8));
+    hints.insert("omarchy-glyph", Value::from(GLYPH));
+    hints.insert("omarchy-exec-argv", Value::from(exec.as_str()));
+    let image = image.map(|p| p.to_string_lossy().into_owned());
+    if let Some(img) = &image {
+        hints.insert("image-path", Value::from(img.as_str()));
     }
+    let actions: Vec<&str> = vec![];
+    conn.call_method(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        Some("org.freedesktop.Notifications"),
+        "Notify",
+        &("Opal", 0u32, "", headline, body, actions, hints, 12_000i32),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Make untrusted text safe to hand to a notification: one line, no control
@@ -147,7 +165,8 @@ pub fn clean(s: &str, max: usize) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;");
-    // A leading dash would be parsed as an option by the sender scripts.
+    // A leading dash would be an option to a command-line sender; D-Bus
+    // takes the text as data, so this is only belt and braces now.
     if out.starts_with('-') {
         format!("\u{2011}{}", out.trim_start_matches('-'))
     } else {
@@ -345,11 +364,6 @@ fn fnv(s: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     })
-}
-
-fn which(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
 }
 
 #[cfg(test)]
