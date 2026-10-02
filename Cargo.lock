@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "opal-cli"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "opal-core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "dirs",
  "nostr",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "opal-kit"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1961,7 +1961,7 @@ dependencies = [
 
 [[package]]
 name = "opal-notify"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "futures",
  "nostr-sdk",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "opal-signer"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "futures",
  "hex",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "opal-status"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "futures",
  "nostr-sdk",
@@ -2016,7 +2016,7 @@ dependencies = [
 
 [[package]]
 name = "opald"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
