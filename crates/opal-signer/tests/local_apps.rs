@@ -287,7 +287,10 @@ async fn sensitive_kind_prompts_and_is_remembered_for_an_hour_at_most() {
 }
 
 #[tokio::test]
-async fn relay_auth_is_automatic_under_basic_and_asks_under_manual() {
+async fn relay_auth_asks_even_under_basic() {
+    // A relay login lets the app read what a relay keeps for you alone
+    // (your DMs on an inbox relay), so it's sensitive under every policy
+    // but full trust.
     let e = env().await;
     let s = signer(&e, true).await;
     let prompts = auto_answer(
@@ -297,20 +300,17 @@ async fn relay_auth_is_automatic_under_basic_and_asks_under_manual() {
             remember: Remember::Once,
         },
     );
-    let (_, token) = s
-        .pair_local_app(pairing(&e, Policy::Basic, &[]))
-        .await
-        .unwrap();
-    sign(&s, &token, e.account, 22242).await.unwrap();
-    assert_eq!(prompts.load(Ordering::SeqCst), 0);
-    assert_eq!(last_activity(&s).await.unwrap().source, Source::BasicPolicy);
-
-    let (_, token) = s
-        .pair_local_app(pairing(&e, Policy::Manual, &[]))
-        .await
-        .unwrap();
-    sign(&s, &token, e.account, 22242).await.unwrap();
-    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    for policy in [Policy::Basic, Policy::Manual] {
+        let (_, token) = s.pair_local_app(pairing(&e, policy, &[])).await.unwrap();
+        let before = prompts.load(Ordering::SeqCst);
+        sign(&s, &token, e.account, 22242).await.unwrap();
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            before + 1,
+            "{policy:?} asks"
+        );
+        assert_eq!(last_activity(&s).await.unwrap().source, Source::User);
+    }
 }
 
 #[tokio::test]

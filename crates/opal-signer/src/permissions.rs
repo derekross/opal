@@ -14,17 +14,18 @@ use crate::protocol::Method;
 
 /// Kinds the Basic policy signs without asking: everyday, additive actions.
 /// Kinds that overwrite state (profile 0, follows 3, relay list 10002,
-/// mutes 10000) or delete (5) always ask, and so do HTTP (27235) and Blossom
-/// (24242) authorizations, which work as login tokens for other services.
+/// mutes 10000) or delete (5) always ask, and so do relay logins (22242),
+/// HTTP (27235) and Blossom (24242) authorizations, which work as login
+/// tokens: a relay login lets an app read what a relay keeps for you alone,
+/// such as your DMs on an inbox relay. Never overlaps [`SENSITIVE_KINDS`].
 /// Stricter than Amber on purpose.
 pub const BASIC_KINDS: &[u16] = &[
-    1,     // short note
-    6,     // repost
-    7,     // reaction
-    16,    // generic repost
-    1111,  // comment
-    9734,  // zap request
-    22242, // relay auth (a relay challenge; short-lived)
+    1,    // short note
+    6,    // repost
+    7,    // reaction
+    16,   // generic repost
+    1111, // comment
+    9734, // zap request
 ];
 
 /// Kinds a client can never get blanket, long-lived permission for: they
@@ -452,8 +453,15 @@ mod tests {
     }
 
     #[test]
+    fn basic_never_allows_a_sensitive_kind() {
+        for k in BASIC_KINDS {
+            assert!(!SENSITIVE_KINDS.contains(k), "kind {k} is both");
+        }
+    }
+
+    #[test]
     fn auth_tokens_ask_under_basic() {
-        for k in [24242, 27235] {
+        for k in [22242, 24242, 27235] {
             assert_eq!(
                 evaluate(Policy::Basic, &[], &Method::SignEvent, Some(k), None, 0),
                 Evaluation::Ask
