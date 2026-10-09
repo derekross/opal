@@ -455,8 +455,13 @@ mod tests {
         let mut reply = n("2", NotifType::Reply, 200);
         reply.detail = "hi\u{202E}there".into();
         s.insert("me", &reply, 200).unwrap();
-        s.put_ref_event(&"r".repeat(64), &"b".repeat(64), 1, "my\u{2066}\u{200B} note")
-            .unwrap();
+        s.put_ref_event(
+            &"r".repeat(64),
+            &"b".repeat(64),
+            1,
+            "my\u{2066}\u{200B} note",
+        )
+        .unwrap();
         s.put_profile(
             &"a".repeat(64),
             &Profile {

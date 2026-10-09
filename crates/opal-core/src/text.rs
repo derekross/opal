@@ -57,7 +57,10 @@ mod tests {
             "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
             "ZWJ holds the family emoji together"
         );
-        assert_eq!(no_invisible("\u{200C}\u{0646}\u{200D}\u{0632}"), "\u{200C}\u{0646}\u{200D}\u{0632}");
+        assert_eq!(
+            no_invisible("\u{200C}\u{0646}\u{200D}\u{0632}"),
+            "\u{200C}\u{0646}\u{200D}\u{0632}"
+        );
         assert_eq!(
             no_invisible("abcd 日本語 <b> & amp"),
             "abcd 日本語 <b> & amp"
