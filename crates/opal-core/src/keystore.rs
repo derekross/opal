@@ -3,9 +3,14 @@
 //! Opal account keys are only ever written here as NIP-49 `ncryptsec`
 //! strings, so a copied keyring file is useless without the Opal passphrase.
 //! Peridot's device identity is the exception: it is meant to work without a
-//! passphrase, so it is only as safe as the login keyring itself. So is the
+//! passphrase, so it is only as safe as the keyring itself. So is the
 //! notification engine's copy of your private mutes, kept so they apply
 //! while Opal is locked.
+//!
+//! Items live in the Secret Service's *default* collection. That is usually
+//! the login keyring, which PAM unlocks at login, but it can be a separate
+//! collection that stays locked until you unlock it: see
+//! [`SecretStore::is_locked`] and [`SecretStore::unlock`].
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -55,18 +60,37 @@ pub enum SecretStore {
 }
 
 impl SecretStore {
-    /// Opal's items in the login keyring.
+    /// Opal's items in the default keyring.
     pub async fn keyring() -> Result<Self> {
         Self::keyring_for(crate::paths::AppDirs::OPAL).await
     }
 
-    /// Another app's items in the login keyring.
+    /// Another app's items in the default keyring.
     pub async fn keyring_for(app: crate::paths::AppDirs) -> Result<Self> {
         Ok(Self::Keyring(oo7::Keyring::new().await?, app.name))
     }
 
     pub fn memory() -> Self {
         Self::Memory(Mutex::new(BTreeMap::new()))
+    }
+
+    /// Whether the collection is locked: nothing can be read or written
+    /// until it's unlocked (`org.freedesktop.Secret.Error.IsLocked`).
+    pub async fn is_locked(&self) -> Result<bool> {
+        match self {
+            Self::Keyring(k, _) => Ok(k.is_locked().await?),
+            Self::Memory(_) => Ok(false),
+        }
+    }
+
+    /// Ask the Secret Service to unlock the collection. It shows its own
+    /// password prompt, and this waits until that's answered; dismissing
+    /// it is an error.
+    pub async fn unlock(&self) -> Result<()> {
+        match self {
+            Self::Keyring(k, _) => Ok(k.unlock().await?),
+            Self::Memory(_) => Ok(()),
+        }
     }
 
     fn attributes(app: &str, kind: ItemKind, id: &str) -> HashMap<&'static str, String> {

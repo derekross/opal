@@ -559,6 +559,9 @@ async fn account(c: &mut Conn, cmd: AccountCmd, raw: bool) -> Result<()> {
             account_index,
         } => {
             let status = c.call("status", json!(null)).await?;
+            if status["keyring_locked"] == json!(true) {
+                bail!("{KEYRING_LOCKED}");
+            }
             let first = status["has_accounts"] != json!(true);
             let secret = if generate {
                 None
@@ -652,7 +655,15 @@ fn read_secret(prompt: &str) -> Result<String> {
     }
 }
 
+/// opald is up but waiting for the Secret Service to be unlocked.
+const KEYRING_LOCKED: &str = "Opal is waiting for your keyring to be unlocked; \
+     answer the keyring's prompt, or use Unlock keyring in the Opal panel";
+
 fn print_status(s: &Value) {
+    if s["keyring_locked"] == json!(true) {
+        println!("{KEYRING_LOCKED}.");
+        return;
+    }
     let locked = s["locked"] == json!(true);
     println!(
         "Signer:   {}{}",

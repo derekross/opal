@@ -18,7 +18,10 @@ Item {
   // Our own record of the link: Socket.connected is also the *requested*
   // state, so it can read true after a failed attempt.
   property bool linked: false
-  readonly property bool connected: linked
+  // opald is up but waiting for the Secret Service collection to be
+  // unlocked; it answers nothing else until then (keyring_wait.rs).
+  readonly property bool keyringLocked: linked && status.keyring_locked === true
+  readonly property bool connected: linked && !keyringLocked
   property bool everConnected: false
 
   // Daemon state (see opald `status`).
@@ -192,6 +195,9 @@ Item {
     reconnectNow()
   }
 
+  // Show the Secret Service's unlock prompt again (it was dismissed).
+  function unlockKeyring() { call("keyring.unlock", null) }
+
   function refreshApps() { call("apps.list", null, function(e, r) { if (!e) root.apps = r || [] }) }
   function refreshPrompts() { call("prompts.list", null, function(e, r) { if (!e) root.prompts = r || [] }) }
   // Apps waiting to be approved: nostrconnect:// links and local programs
@@ -297,6 +303,7 @@ Item {
     call("scrobbles.stats", null, function(e, r) { if (!e) root.playStats = r || {} })
   }
   function refreshAll() {
+    if (keyringLocked) return
     refreshApps(); refreshPrompts(); refreshOffers(); refreshActivity(); refreshConfig(); refreshNotifications(); refreshStatus()
   }
 
@@ -440,8 +447,11 @@ Item {
     for (var id in waiting) waiting[id]("Opal restarted before answering; check that it took effect", null)
     if (up) {
       root.everConnected = true
-      root.call("subscribe", null, function(err, s) { if (!err) root.status = s || {} })
-      root.refreshAll()
+      root.call("subscribe", null, function(err, s) {
+        if (err) return
+        root.status = s || {}
+        if (!root.keyringLocked) root.refreshAll()
+      })
     } else {
       root.status = ({})
     }

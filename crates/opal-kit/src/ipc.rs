@@ -126,7 +126,8 @@ pub trait Service: Send + Sync + 'static {
 }
 
 /// Serve `svc` on `path` until the listener fails. `name` is used in the
-/// "already running" message.
+/// "already running" message. Dropping the future closes the listener and
+/// every open connection with it, so clients notice and reconnect.
 pub async fn serve<S: Service>(svc: Arc<S>, path: &Path, name: &str) -> Result<()> {
     if path.exists() {
         // Refuse to start twice; a stale socket from a crash is replaced.
@@ -141,8 +142,12 @@ pub async fn serve<S: Service>(svc: Arc<S>, path: &Path, name: &str) -> Result<(
     tracing::info!("listening on {}", path.display());
 
     let uid = rustix::process::geteuid().as_raw();
+    let mut conns = tokio::task::JoinSet::new();
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = tokio::select! {
+            r = listener.accept() => r?.0,
+            Some(_) = conns.join_next() => continue,
+        };
         let peer = match stream.peer_cred() {
             Ok(cred) if cred.uid() == uid => Peer::for_pid(uid, cred.pid()),
             _ => {
@@ -151,7 +156,7 @@ pub async fn serve<S: Service>(svc: Arc<S>, path: &Path, name: &str) -> Result<(
             }
         };
         let svc = svc.clone();
-        tokio::spawn(async move {
+        conns.spawn(async move {
             if let Err(e) = handle(svc, stream, peer).await {
                 tracing::debug!("client disconnected: {e}");
             }
@@ -163,7 +168,7 @@ async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream, peer: Peer) -> Resu
     let (read, mut write) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<String>(64);
 
-    let writer = tokio::spawn(async move {
+    let mut writer = AbortOnDrop(tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
             if write.write_all(line.as_bytes()).await.is_err()
                 || write.write_all(b"\n").await.is_err()
@@ -171,7 +176,8 @@ async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream, peer: Peer) -> Resu
                 break;
             }
         }
-    });
+    }));
+    let mut forwarder = None;
 
     let mut reader = BufReader::new(read);
     let mut line = String::new();
@@ -208,7 +214,7 @@ async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream, peer: Peer) -> Resu
         if req.method == "subscribe" {
             if !subscribed {
                 subscribed = true;
-                spawn_forwarder(svc.clone(), peer.clone(), tx.clone());
+                forwarder = Some(spawn_forwarder(svc.clone(), peer.clone(), tx.clone()));
             }
             let resp = IpcResponse {
                 id: req.id,
@@ -244,14 +250,24 @@ async fn handle<S: Service>(svc: Arc<S>, stream: UnixStream, peer: Peer) -> Resu
         });
     }
     line.zeroize();
+    drop(forwarder);
     drop(tx);
-    writer.await.ok();
+    (&mut writer.0).await.ok();
     Ok(())
 }
 
-fn spawn_forwarder<S: Service>(svc: Arc<S>, peer: Peer, tx: mpsc::Sender<String>) {
+/// A task that ends with the connection, also when [`serve`] is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_forwarder<S: Service>(svc: Arc<S>, peer: Peer, tx: mpsc::Sender<String>) -> AbortOnDrop {
     let mut events = svc.events();
-    tokio::spawn(async move {
+    AbortOnDrop(tokio::spawn(async move {
         loop {
             let ev: IpcEvent = match events.recv().await {
                 Ok(e) => e,
@@ -268,7 +284,7 @@ fn spawn_forwarder<S: Service>(svc: Arc<S>, peer: Peer, tx: mpsc::Sender<String>
                 break;
             }
         }
-    });
+    }))
 }
 
 #[cfg(test)]
@@ -302,5 +318,64 @@ mod tests {
         );
         assert_eq!(unit_from_cgroup("0::/"), None);
         assert_eq!(unit_from_cgroup("1:name=systemd:/x.service"), None);
+    }
+
+    struct Echo(broadcast::Sender<IpcEvent>);
+
+    impl Service for Echo {
+        fn dispatch(
+            self: Arc<Self>,
+            method: String,
+            _: Value,
+        ) -> BoxFuture<'static, Result<Value>> {
+            Box::pin(async move { Ok(Value::String(method)) })
+        }
+        fn snapshot(self: Arc<Self>) -> BoxFuture<'static, Value> {
+            Box::pin(async { Value::Null })
+        }
+        fn events(&self) -> broadcast::Receiver<IpcEvent> {
+            self.0.subscribe()
+        }
+    }
+
+    /// opald serves a stand-in while the keyring is locked and drops it
+    /// when it unlocks; connected clients (subscribed ones too) must see
+    /// the end so they reconnect to the real one.
+    #[tokio::test]
+    async fn dropping_the_server_closes_its_connections() {
+        let dir = std::env::temp_dir().join(format!("opal-ipc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sock");
+        let svc = Arc::new(Echo(broadcast::channel(1).0));
+        let at = path.clone();
+        let server = tokio::spawn(async move { serve(svc, &at, "test").await });
+        let mut client = loop {
+            if let Ok(c) = UnixStream::connect(&path).await {
+                break BufReader::new(c);
+            }
+            tokio::task::yield_now().await;
+        };
+        client
+            .get_mut()
+            .write_all(b"{\"id\":1,\"method\":\"subscribe\",\"params\":null}\n{\"id\":2,\"method\":\"ping\",\"params\":null}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        for _ in 0..2 {
+            line.clear();
+            client.read_line(&mut line).await.unwrap();
+            assert!(line.contains("\"result\""), "{line}");
+        }
+        server.abort();
+        line.clear();
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_line(&mut line),
+        )
+        .await
+        .expect("the connection closes")
+        .unwrap();
+        assert_eq!(n, 0, "EOF, got {line}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -156,6 +156,7 @@ Item {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               text: {
+                if (root.svc && root.svc.keyringLocked) return "Waiting for your keyring"
                 if (!root.up) return "The Opal daemon isn't running"
                 if (root.svc.readOnly) return (root.svc.identity.nip05 || U.shortKey(root.svc.identity.npub)) + " · read-only"
                 var a = root.svc.currentAccount
@@ -218,10 +219,33 @@ Item {
           text: root.toast
         }
 
+        // ── Keyring locked: opald waits for it ────────────────────
+        Column {
+          width: parent.width
+          visible: !!root.svc && root.svc.keyringLocked
+          spacing: Style.space(8)
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            text: "Your keys are in a keyring that is still locked. Opal starts as soon as it's unlocked."
+          }
+          Button {
+            text: "Unlock keyring"
+            iconText: "󰌾"
+            bordered: true
+            foreground: root.foreground
+            onClicked: root.svc.unlockKeyring()
+          }
+        }
+
         // ── Daemon not running ────────────────────────────────────
         Column {
           width: parent.width
-          visible: !root.up
+          visible: !root.up && !(root.svc && root.svc.keyringLocked)
           spacing: Style.space(8)
           Text {
             textFormat: Text.PlainText

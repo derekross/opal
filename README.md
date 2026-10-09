@@ -113,6 +113,17 @@ without a pin for its version refuses the download and says so. Choose explicitl
 `install.sh --prebuilt`. To check a download yourself:
 `gh attestation verify opal-v0.3.2-x86_64-linux.tar.gz --repo derekross/opal`.
 
+### When the keyring is locked
+
+Opal keeps its items in the Secret Service's *default* collection. On most
+systems that's the login keyring, which is unlocked when you log in. If yours
+points somewhere else (a separate `Default keyring`, say), it is still locked
+when Opal starts. Opal then asks the keyring to unlock (its own password
+prompt) and waits, and the bar says it's waiting for your keyring. If you
+dismissed the prompt, **Unlock keyring** in the panel shows it again; unlocking
+it any other way (Seahorse, say) works too. Opal starts as soon as it's
+unlocked.
+
 ## Update
 
 ```sh

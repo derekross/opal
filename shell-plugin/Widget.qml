@@ -61,6 +61,7 @@ Panel {
     active: root.attention > 0
     dimmed: !root.daemonUp || root.locked
     tooltipText: {
+      if (root.svc && root.svc.keyringLocked) return "Opal: waiting for your keyring to be unlocked"
       if (!root.daemonUp) return "Opal isn't running"
       if (root.attention > 0) return root.attention + " waiting for you"
       if (!root.svc.hasAccounts) return "Opal: set up your Nostr key"

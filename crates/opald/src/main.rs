@@ -4,6 +4,7 @@ mod api;
 mod app;
 mod handlers;
 mod ipc;
+mod keyring_wait;
 mod modules;
 mod notify;
 mod profiles;
@@ -70,6 +71,8 @@ async fn main() -> Result<()> {
             .await
             .context("connecting to the Secret Service (is gnome-keyring running?)")?
     };
+    let socket = args.socket.unwrap_or_else(paths::socket_path);
+    keyring_wait::wait_until_unlocked(&store, &socket).await?;
 
     let app = app::App::new(app::Options {
         config,
@@ -83,7 +86,6 @@ async fn main() -> Result<()> {
     modules::reconcile(&app).await;
     modules::connect_bunker_in_background(&app);
 
-    let socket = args.socket.unwrap_or_else(paths::socket_path);
     let server = opal_kit::ipc::serve(app.clone(), &socket, "opald");
     tokio::select! {
         r = server => r?,
