@@ -83,6 +83,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE apps ADD COLUMN dm INTEGER NOT NULL DEFAULT 0;
 "#,
+    // File messages (15) became sensitive. Before, `nip:17` granted them
+    // forever when an app connected, pairing could pre-allow them and an
+    // "always" in the dialog kept them forever. None of those was a choice
+    // about a sensitive kind, so every forever-allow for 15 goes; it asks
+    // again, and is remembered for an hour at most from now on.
+    r#"
+    DELETE FROM rules
+    WHERE method = 'sign_event' AND kind = 15 AND allow = 1 AND until IS NULL;
+"#,
 ];
 
 /// An app as stored, without its transport secret key.
@@ -704,6 +713,47 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "old");
         assert!(s.local_apps().unwrap().is_empty());
+    }
+
+    #[test]
+    fn forever_file_message_grants_are_dropped() {
+        let db = Db::open_in_memory().unwrap();
+        db.migrate("signer", &MIGRATIONS[..4]).unwrap();
+        let s = SignerStore { db: db.clone() };
+        s.save_app(&app("a")).unwrap();
+        let rule = |kind, allow, until, created_at| Rule {
+            app_id: "a".into(),
+            method: Method::SignEvent,
+            kind: Some(kind),
+            allow,
+            until,
+            created_at,
+        };
+        // With the connection (app created at 100) and from the dialog later.
+        s.put_rule(&rule(15, true, None, 100)).unwrap();
+        s.put_rule(&rule(1, true, None, 100)).unwrap();
+        let s = SignerStore::new(db).unwrap();
+        let kinds: Vec<_> = s.rules("a").unwrap().iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, vec![Some(1)]);
+    }
+
+    #[test]
+    fn file_message_rules_that_end_or_deny_stay() {
+        let db = Db::open_in_memory().unwrap();
+        db.migrate("signer", &MIGRATIONS[..4]).unwrap();
+        let s = SignerStore { db: db.clone() };
+        s.save_app(&app("a")).unwrap();
+        s.put_rule(&Rule {
+            app_id: "a".into(),
+            method: Method::SignEvent,
+            kind: Some(15),
+            allow: false,
+            until: None,
+            created_at: 500,
+        })
+        .unwrap();
+        let s = SignerStore::new(db).unwrap();
+        assert_eq!(s.rules("a").unwrap().len(), 1, "a deny stays");
     }
 
     fn store() -> SignerStore {

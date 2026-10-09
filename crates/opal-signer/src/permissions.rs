@@ -38,6 +38,7 @@ pub const SENSITIVE_KINDS: &[u16] = &[
     5,     // deletion
     13,    // seal (a private message going out)
     14,    // direct message
+    15,    // file message (a private message, like 14)
     62,    // request to vanish
     9735,  // zap receipt
     10000, // mute list
@@ -387,12 +388,8 @@ mod tests {
         let got = expand_perms(&perms);
         assert_eq!(
             got,
-            vec![
-                (Method::SignEvent, Some(1)),
-                (Method::Nip44Encrypt, None),
-                (Method::SignEvent, Some(15)),
-            ],
-            "direct message (14) and DM relay list (10050) are sensitive"
+            vec![(Method::SignEvent, Some(1)), (Method::Nip44Encrypt, None),],
+            "direct (14) and file (15) messages and DM relays (10050) are sensitive"
         );
     }
 
