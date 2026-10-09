@@ -104,6 +104,10 @@ impl Requester {
     }
 }
 
+/// Why a program that can't be told apart from others may not pair.
+pub const UNIDENTIFIED: &str = "can't tell which program this is (no systemd unit or \
+     executable); run it as a systemd service or app scope and pair again";
+
 impl Signer {
     /// Record a pairing the user approved. Returns the app and its new
     /// token; only the token's hash is kept. Pairing an app key that is
@@ -114,6 +118,9 @@ impl Signer {
         p: LocalPairing,
     ) -> Result<(ConnectionInfo, Zeroizing<String>), SignerError> {
         let inner = &self.inner;
+        if p.exe.is_none() && p.unit.is_none() {
+            return Err(SignerError::Unidentified);
+        }
         inner.check_account(&p.account).await?;
         let store = inner.store.as_ref().ok_or(SignerError::NoStore)?;
         let now = Timestamp::now();
@@ -178,12 +185,17 @@ impl Signer {
     }
 
     /// The token is only good from where the pairing was made: the same
-    /// systemd unit, and the same executable where that could be read.
+    /// systemd unit, and the same executable where that could be read. A
+    /// pairing that recorded neither can't be tied to anything, so it is
+    /// refused rather than good from everywhere.
     pub fn check_local_peer(
         a: &LocalAppRecord,
         peer_exe: Option<&Path>,
         peer_unit: Option<&str>,
     ) -> Result<(), String> {
+        if a.exe.is_none() && a.unit.is_none() {
+            return Err(UNIDENTIFIED.into());
+        }
         let exe = peer_exe.map(|p| p.to_string_lossy().into_owned());
         if exe == a.exe && peer_unit == a.unit.as_deref() {
             Ok(())
@@ -380,5 +392,13 @@ mod tests {
         assert!(Signer::check_local_peer(&a, exe, Some("peridot.service")).is_err());
         let err = Signer::check_local_peer(&a, None, Some("other.service")).unwrap_err();
         assert!(err.contains("peridot.service"), "{err}");
+        // Paired with nothing to recognise it by: never good, not even
+        // from another process that has nothing either.
+        a.unit = None;
+        assert_eq!(
+            Signer::check_local_peer(&a, None, None).unwrap_err(),
+            UNIDENTIFIED
+        );
+        assert!(Signer::check_local_peer(&a, exe, Some("peridot.service")).is_err());
     }
 }

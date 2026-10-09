@@ -568,6 +568,11 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             if kinds.len() > opal_signer::local::MAX_KINDS {
                 bail!("too many kinds (max {})", opal_signer::local::MAX_KINDS);
             }
+            // The token is bound to the caller's unit or executable; with
+            // neither there is nothing to bind it to.
+            if peer.exe.is_none() && peer.unit.is_none() {
+                bail!("{}", opal_signer::local::UNIDENTIFIED);
+            }
             let account = account_or_current(app, p.pubkey.as_deref())?;
             if !app.vault.accounts().await?.contains(&account) {
                 bail!("unknown account");

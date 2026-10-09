@@ -52,6 +52,9 @@ pub enum SignerError {
     UnknownApp,
     #[error("no signer store")]
     NoStore,
+    /// A local app with no unit or executable to bind its token to.
+    #[error("{}", crate::local::UNIDENTIFIED)]
+    Unidentified,
 }
 
 /// Things the UI wants to hear about.
