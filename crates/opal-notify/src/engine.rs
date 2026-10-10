@@ -249,6 +249,9 @@ impl Runner {
                         self.apply_mutes(lists.mute_event.as_ref()).await;
                     }
                     let _ = self.store.prune_orphans(&self.me_hex);
+                    // Relays can drop a subscription without telling us;
+                    // re-issuing it is cheap and keeps the feed alive.
+                    self.subscribe(&read, &dm, dms).await;
                     self.emit_status(true).await;
                 }
             }
@@ -405,7 +408,21 @@ impl Runner {
         vault.keys(&self.me).await.ok()
     }
 
+    /// Subscribe to the notification feeds. Safe to re-issue: relays can
+    /// silently drop a subscription (CLOSED, rate-limit, a REQ lost while the
+    /// socket was coming up) and nothing notices, so periodic re-subscribing
+    /// is how the feed heals itself.
     async fn subscribe(&self, read: &[RelayUrl], dm: &[RelayUrl], dms: bool) {
+        // Unsubscribe first: a relay that dropped us is healed by the fresh
+        // REQ, and one still holding the sub just replaces it.
+        let _ = self
+            .client
+            .unsubscribe(&SubscriptionId::new(FEED_SUB))
+            .await;
+        let _ = self
+            .client
+            .unsubscribe(&SubscriptionId::new(DM_SUB))
+            .await;
         let t = &self.cfg.types;
         let mut kinds = Vec::new();
         if t.replies || t.mentions {
@@ -728,5 +745,47 @@ pub fn parse_profile(content: &str) -> Profile {
         picture: s("picture").filter(|p| p.starts_with("https://") && p.len() < 2048),
         nip05: s("nip05").map(|v| v.chars().take(100).collect()),
         about: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opal_core::db::Db;
+
+    fn runner(client: Client) -> Runner {
+        let me = Keys::generate().public_key();
+        let (events, _) = broadcast::channel(16);
+        Runner {
+            me,
+            me_hex: me.to_hex(),
+            cfg: NotificationsConfig::default(),
+            store: NotifyStore::new(Db::open_in_memory().unwrap()).unwrap(),
+            vault: None,
+            client,
+            events,
+            status: Arc::new(RwLock::new(NotifyStatus::default())),
+            muted: HashSet::new(),
+            started: Timestamp::now().as_secs(),
+            mute_event: None,
+            private_mutes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resubscribing_is_idempotent() {
+        let relay = MockRelay::run().await.unwrap();
+        let url = relay.url().await;
+        let client = Client::default();
+        client.add_relay(&url).await.unwrap();
+        client.connect().and_wait(Duration::from_secs(3)).await;
+
+        let r = runner(client);
+        let read = vec![url];
+        r.subscribe(&read, &[], false).await;
+        // The refresh tick re-issues the same subscriptions; a second issue
+        // must not surface an error (e.g. "subscription ID already exists").
+        r.subscribe(&read, &[], false).await;
+        assert!(r.status.read().await.error.is_none());
     }
 }
