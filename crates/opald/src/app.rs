@@ -274,6 +274,10 @@ impl App {
         if self.signer_started.load(Ordering::Relaxed) {
             self.signer.set_online(online && signer_on).await;
         }
+        if !online {
+            // Waiting requests are refused now; close what they asked.
+            self.prompts.dismiss_all();
+        }
         self.emit_state().await;
     }
 

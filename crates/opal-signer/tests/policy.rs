@@ -341,3 +341,177 @@ async fn forward_dated_and_auth_events_always_ask() {
     sign(&app, 1).await.unwrap();
     assert_eq!(prompts.load(Ordering::SeqCst), 2);
 }
+
+/// The last activity entry for `app_id`, once one is logged.
+async fn last_activity(s: &Signer, app_id: &str) -> opal_signer::store::ActivityEntry {
+    for _ in 0..100 {
+        let log = s
+            .store()
+            .unwrap()
+            .activity(&ActivityQuery::default())
+            .unwrap();
+        if let Some(e) = log
+            .into_iter()
+            .find(|e| e.app_id == app_id && e.kind == Some(1))
+        {
+            return e;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no activity logged for {app_id}");
+}
+
+/// A request waiting for an unlock must not be signed once the app was
+/// revoked in the meantime, even under a policy that would allow it.
+#[tokio::test]
+async fn revoked_while_waiting_for_unlock_is_not_signed() {
+    let e = env().await;
+    let s = signer(&e).await;
+    let (info, uri) = s
+        .create_bunker(e.account, Some("App".into()), None, Policy::Basic, None)
+        .await
+        .unwrap();
+    let parsed = nostr_connect::prelude::NostrConnectUri::parse(&uri).unwrap();
+    let app = NostrConnect::new(parsed, Keys::generate(), Duration::from_secs(4), None).unwrap();
+    sign(&app, 7).await.unwrap(); // connected, key known
+    e.vault.lock().await;
+
+    let mut events = s.subscribe_events();
+    let pending = tokio::spawn(async move { sign(&app, 1).await });
+    // Wait until it's parked on the lock.
+    tokio::time::timeout(TIMEOUT, async {
+        while !matches!(
+            events.recv().await,
+            Ok(opal_signer::SignerEvent::UnlockNeeded { .. })
+        ) {}
+    })
+    .await
+    .unwrap();
+
+    assert!(s.remove_app(&info.id).await.unwrap());
+    e.vault.unlock("pw").await.unwrap();
+
+    let entry = last_activity(&s, &info.id).await;
+    assert!(!entry.allowed);
+    assert_eq!(entry.reason.as_deref(), Some(opal_signer::server::REVOKED));
+    assert!(
+        pending.await.unwrap().is_err(),
+        "no signature, and no reply under the retired key"
+    );
+}
+
+/// Revoked while its prompt is open: an "allow" that arrives afterwards
+/// signs nothing, and revoking through the hub closes the prompt.
+#[tokio::test]
+async fn revoked_while_prompting_is_not_signed() {
+    let e = env().await;
+    let s = signer(&e).await;
+    let (info, uri) = s
+        .create_bunker(e.account, Some("App".into()), None, Policy::Manual, None)
+        .await
+        .unwrap();
+    let parsed = nostr_connect::prelude::NostrConnectUri::parse(&uri).unwrap();
+    let app = NostrConnect::new(parsed, Keys::generate(), Duration::from_secs(4), None).unwrap();
+    // Manual asks for the key too; let that one through.
+    let mut rx = e.prompts.subscribe();
+    let pending = tokio::spawn(async move { sign(&app, 1).await });
+    let (s2, prompts, id) = (s.clone(), e.prompts.clone(), info.id.clone());
+    tokio::time::timeout(TIMEOUT, async move {
+        while let Ok(ev) = rx.recv().await {
+            let PromptEvent::Opened { prompt } = ev else {
+                continue;
+            };
+            let allow = PromptAnswer {
+                allow: true,
+                remember: Remember::Once,
+            };
+            if prompt.request.method == Method::GetPublicKey {
+                prompts.answer(&prompt.id, allow);
+                continue;
+            }
+            assert!(s2.remove_app(&id).await.unwrap());
+            prompts.answer(&prompt.id, allow);
+            break;
+        }
+    })
+    .await
+    .unwrap();
+
+    let entry = last_activity(&s, &info.id).await;
+    assert!(!entry.allowed);
+    assert_eq!(entry.reason.as_deref(), Some(opal_signer::server::REVOKED));
+    assert!(pending.await.unwrap().is_err());
+}
+
+/// Made stricter while a request waited for an unlock: the stricter policy
+/// decides, so what Basic would have signed now asks.
+#[tokio::test]
+async fn policy_downgrade_while_waiting_for_unlock_applies() {
+    let e = env().await;
+    let s = signer(&e).await;
+    let (info, uri) = s
+        .create_bunker(e.account, Some("App".into()), None, Policy::Basic, None)
+        .await
+        .unwrap();
+    let app = client(&uri);
+    sign(&app, 7).await.unwrap();
+    e.vault.lock().await;
+    let asked = auto_answer(
+        e.prompts.clone(),
+        PromptAnswer {
+            allow: false,
+            remember: Remember::Once,
+        },
+    );
+    let mut events = s.subscribe_events();
+    let pending = tokio::spawn(async move { sign(&app, 1).await });
+    tokio::time::timeout(TIMEOUT, async {
+        while !matches!(
+            events.recv().await,
+            Ok(opal_signer::SignerEvent::UnlockNeeded { .. })
+        ) {}
+    })
+    .await
+    .unwrap();
+    s.update_app(&info.id, None, Some(Policy::Manual), None)
+        .await
+        .unwrap();
+    e.vault.unlock("pw").await.unwrap();
+    assert!(pending.await.unwrap().is_err());
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "it asked instead of signing"
+    );
+}
+
+/// Kill switch while a request waits for an unlock: refused, not signed.
+#[tokio::test]
+async fn kill_switch_while_waiting_for_unlock_signs_nothing() {
+    let e = env().await;
+    let s = signer(&e).await;
+    let (info, uri) = s
+        .create_bunker(e.account, Some("App".into()), None, Policy::Basic, None)
+        .await
+        .unwrap();
+    let parsed = nostr_connect::prelude::NostrConnectUri::parse(&uri).unwrap();
+    let app = NostrConnect::new(parsed, Keys::generate(), Duration::from_secs(4), None).unwrap();
+    sign(&app, 7).await.unwrap();
+    e.vault.lock().await;
+    let mut events = s.subscribe_events();
+    let pending = tokio::spawn(async move { sign(&app, 1).await });
+    tokio::time::timeout(TIMEOUT, async {
+        while !matches!(
+            events.recv().await,
+            Ok(opal_signer::SignerEvent::UnlockNeeded { .. })
+        ) {}
+    })
+    .await
+    .unwrap();
+    s.set_online(false).await;
+    e.vault.unlock("pw").await.unwrap();
+    let entry = last_activity(&s, &info.id).await;
+    assert!(!entry.allowed);
+    assert_eq!(entry.reason.as_deref(), Some(opal_signer::server::STOPPED));
+    assert!(pending.await.unwrap().is_err());
+}

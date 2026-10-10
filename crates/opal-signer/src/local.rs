@@ -100,6 +100,7 @@ impl Requester {
             app_image: None,
             account: a.account,
             policy: a.policy,
+            binding: Some(a.token_hash.clone()),
         }
     }
 }

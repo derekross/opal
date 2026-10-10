@@ -24,8 +24,9 @@ daemon, one gem icon, and modules you switch on as you need them:
 - Per-app policy: **Basic** (everyday actions like notes, reactions and reposts are signed automatically), **Ask** for everything, or **Trust**.
 - An approval dialog shows exactly what will be signed (content, key tags, odd dates), with "remember" choices from once to always.
 - Profile, follow-list, relay-list and mute-list updates, deletions, private messages (NIP-17 direct and file messages, their seals and your DM relay list), relay logins (NIP-42 AUTH, which let an app read what a relay keeps for you alone, like DMs on an inbox relay), HTTP/Blossom auth tokens and wallet events always ask, under every policy but Trust, and can be remembered for an hour at most. So does anything dated more than 10 minutes from now.
+- Revoking an app takes effect at once: requests it still has waiting (for an unlock or for your answer) are refused and get no reply, and their prompts close. Pairing a local app again does the same to requests from its earlier pairing, and a stricter policy set while a request waits is the one that decides.
 - Activity log of what each app did and why it was allowed or denied (saved rule, basic policy, you…), with a privacy mode.
-- Kill switch to stop answering every app at once.
+- Kill switch to stop answering every app at once, remote and local; requests already waiting are refused too.
 - **Local apps** (programs on this computer, like [Peridot](https://github.com/derekross/peridot)) can use your key too, but only after you pair them in the same dialog, which shows which program is asking. They appear under Apps with the same policies, saved answers and activity log, and can be revoked there. Blossom and relay-auth kinds still ask every time. See [Local apps](#local-apps).
 
 ### Notifications

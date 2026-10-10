@@ -127,6 +127,25 @@ impl PromptHub {
         removed
     }
 
+    /// Dismiss every prompt one app has waiting (it was revoked).
+    pub fn dismiss_for(&self, connection_id: &str) -> usize {
+        self.dismiss_where(|p| p.request.connection_id == connection_id)
+    }
+
+    /// Dismiss every prompt (the signer stopped answering).
+    pub fn dismiss_all(&self) -> usize {
+        self.dismiss_where(|_| true)
+    }
+
+    fn dismiss_where(&self, f: impl Fn(&Prompt) -> bool) -> usize {
+        let ids: Vec<String> = lock(&self.pending)
+            .values()
+            .filter(|(p, _)| f(p))
+            .map(|(p, _)| p.id.clone())
+            .collect();
+        ids.iter().filter(|id| self.dismiss(id)).count()
+    }
+
     pub fn pending(&self) -> Vec<Prompt> {
         let mut v: Vec<Prompt> = lock(&self.pending)
             .values()

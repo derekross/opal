@@ -87,6 +87,11 @@ pub enum SignerEvent {
     },
 }
 
+/// Why a request from an app that was revoked while it waited is refused.
+pub const REVOKED: &str = "this app's access was revoked";
+/// Why a request that was waiting when the signer was turned off is refused.
+pub const STOPPED: &str = "Opal stopped answering apps (kill switch or signer off)";
+
 #[derive(Clone)]
 pub struct Signer {
     pub(crate) inner: Arc<Inner>,
@@ -105,6 +110,9 @@ pub(crate) struct Inner {
     unlock_nags: Mutex<std::collections::HashMap<String, u64>>,
     /// Caps how many requests are handled at once.
     busy: Arc<tokio::sync::Semaphore>,
+    /// Cleared by the kill switch ([`Signer::set_online`]); requests already
+    /// waiting are refused rather than finished.
+    answering: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -191,6 +199,10 @@ pub(crate) struct Requester {
     pub app_image: Option<String>,
     pub account: PublicKey,
     pub policy: Policy,
+    /// What the request was authenticated with, beyond the id: a local
+    /// app's token hash. Pairing again rotates it, so a request from the
+    /// old pairing doesn't carry on as the new one.
+    pub binding: Option<String>,
 }
 
 impl Requester {
@@ -202,8 +214,16 @@ impl Requester {
             app_image: c.image.clone(),
             account: c.account,
             policy: c.policy,
+            binding: None,
         }
     }
+}
+
+/// An app as it is now, for [`Inner::recheck`].
+struct Current {
+    policy: Policy,
+    account: PublicKey,
+    binding: Option<String>,
 }
 
 /// What to do when the vault is locked.
@@ -253,6 +273,7 @@ impl Signer {
                 sub_id: SubscriptionId::new("opal-nip46"),
                 unlock_nags: Mutex::new(std::collections::HashMap::new()),
                 busy: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+                answering: std::sync::atomic::AtomicBool::new(true),
             }),
         }
     }
@@ -300,6 +321,9 @@ impl Signer {
 
     /// Disconnect from all relays (kill switch) or reconnect.
     pub async fn set_online(&self, online: bool) {
+        self.inner
+            .answering
+            .store(online, std::sync::atomic::Ordering::SeqCst);
         if online {
             self.inner.client.connect().await;
             if let Err(e) = self.inner.resubscribe().await {
@@ -308,6 +332,13 @@ impl Signer {
         } else {
             self.inner.client.disconnect().await;
         }
+    }
+
+    /// Whether the signer answers apps (not turned off by the kill switch).
+    pub fn is_answering(&self) -> bool {
+        self.inner
+            .answering
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub async fn shutdown(&self) {
@@ -491,6 +522,46 @@ impl Signer {
 }
 
 impl Inner {
+    /// The app as it is now; `None` once it was removed (a remote
+    /// connection or a paired local app), or if it can't be read.
+    async fn current(&self, id: &str) -> Option<Current> {
+        if let Some(c) = self.conns.get(id).await {
+            return Some(Current {
+                policy: c.policy,
+                account: c.account,
+                binding: None,
+            });
+        }
+        self.store
+            .as_ref()?
+            .local_app(id)
+            .ok()
+            .flatten()
+            .map(|a| Current {
+                policy: a.policy,
+                account: a.account,
+                binding: Some(a.token_hash),
+            })
+    }
+
+    /// A request that waited (for an unlock, a prompt, a rule) goes on only
+    /// if nothing it started with changed: the signer still answers, and
+    /// the app is still there, for the same account, under the same
+    /// pairing. Returns the app's policy now.
+    async fn recheck(
+        &self,
+        approval: &ApprovalRequest,
+        binding: &Option<String>,
+    ) -> Result<Policy, &'static str> {
+        if !self.answering.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(STOPPED);
+        }
+        match self.current(&approval.connection_id).await {
+            Some(c) if c.account == approval.account && c.binding == *binding => Ok(c.policy),
+            _ => Err(REVOKED),
+        }
+    }
+
     pub(crate) fn emit(&self, e: SignerEvent) {
         let _ = self.events.send(e);
     }
@@ -634,6 +705,13 @@ impl Inner {
             Ok(result) => Response::ok(&req.id, result),
             Err(error) => Response::err(&req.id, error),
         };
+        // Removed while this was waiting: its transport key is retired, so
+        // nothing more goes out under it. Nor after the kill switch.
+        if self.conns.get(&conn.id).await.is_none()
+            || !self.answering.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         // Reply on the connection's relays (and the one it came in on, if
         // that is one of them); never somewhere a stranger chose.
         let via = conn.relays.contains(&relay).then_some(relay);
@@ -794,6 +872,7 @@ impl Inner {
         op: Op,
         when_locked: WhenLocked,
     ) -> Result<Outcome, String> {
+        let binding = who.binding;
         let mut approval = ApprovalRequest {
             connection_id: who.connection_id,
             app_name: who.app_name,
@@ -842,6 +921,14 @@ impl Inner {
             }
         }
 
+        // The request may have waited a long time for that unlock. Decide
+        // on the app as it is now: revoked or turned off means no, and a
+        // changed policy applies.
+        match self.recheck(&approval, &binding).await {
+            Ok(policy) => approval.policy = policy,
+            Err(why) => return self.finish(&approval, Source::Automatic, Err(why.into())),
+        }
+
         let decision = tokio::time::timeout(timeout, self.approver.decide(&approval))
             .await
             .unwrap_or_else(|_| {
@@ -858,6 +945,13 @@ impl Inner {
                 return self.finish(&approval, Source::Error, Err("signer unavailable".into()));
             }
         };
+        // Revoked or turned off while a prompt or rule was deciding: nothing
+        // is signed. A revoke that lands after this check counts as after
+        // the signature; for a remote app the reply is still held back
+        // (handle_event checks again before replying).
+        if let Err(why) = self.recheck(&approval, &binding).await {
+            return self.finish(&approval, Source::Automatic, Err(why.into()));
+        }
         let sk = keys.secret_key();
         let result: Result<Outcome, String> = match op {
             Op::GetPublicKey => Ok(Outcome::PublicKey(approval.account)),

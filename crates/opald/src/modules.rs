@@ -59,6 +59,7 @@ async fn reconcile_signer(app: &Arc<App>) {
         }
     } else if app.signer_started.load(Ordering::SeqCst) {
         app.signer.set_online(false).await;
+        app.prompts.dismiss_all();
         tracing::info!("signer off");
     }
 }

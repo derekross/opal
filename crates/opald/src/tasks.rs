@@ -40,6 +40,11 @@ async fn forward_signer_events(app: Arc<App>) {
             SignerEvent::UnlockNeeded {
                 app_name, method, ..
             } => notify::unlock_needed(&app, app_name, method.as_str()).await,
+            // However it went (revoked, logged out, its account removed),
+            // its requests are refused now; close what they asked.
+            SignerEvent::Disconnected { connection_id } => {
+                app.prompts.dismiss_for(connection_id);
+            }
             _ => {}
         }
         app.emit("signer", serde_json::to_value(&ev).unwrap_or_default());
@@ -55,6 +60,18 @@ async fn forward_prompt_events(app: Arc<App>) {
             Err(RecvError::Closed) => break,
         };
         if let PromptEvent::Opened { prompt } = &ev {
+            // Asked just as the app was removed, or the signer stopped: it
+            // would be refused anyway, so don't put it in front of you.
+            if app
+                .signer
+                .app_info(&prompt.request.connection_id)
+                .await
+                .is_none()
+                || !app.signer.is_answering()
+            {
+                app.prompts.dismiss(&prompt.id);
+                continue;
+            }
             notify::prompt_opened(&app, prompt).await;
         }
         app.emit("prompt", serde_json::to_value(&ev).unwrap_or_default());

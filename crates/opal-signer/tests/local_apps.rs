@@ -712,3 +712,108 @@ async fn denied_prompt_is_logged_with_its_reason() {
     assert!(!entry.allowed);
     assert_eq!(entry.source, Source::User);
 }
+
+/// Run one signing request for the token's app and act while its prompt
+/// is open; the prompt is then allowed. Returns the request's result.
+async fn act_during_prompt<F, Fut>(
+    e: &Env,
+    s: &Signer,
+    token: &str,
+    act: F,
+) -> Result<Event, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut rx = e.prompts.subscribe();
+    let (s2, token, account) = (s.clone(), token.to_string(), e.account);
+    let pending = tokio::spawn(async move { sign(&s2, &token, account, 30078).await });
+    let id = loop {
+        if let Ok(PromptEvent::Opened { prompt }) = rx.recv().await {
+            break prompt.id;
+        }
+    };
+    act().await;
+    e.prompts.answer(
+        &id,
+        PromptAnswer {
+            allow: true,
+            remember: Remember::Once,
+        },
+    );
+    pending.await.unwrap()
+}
+
+#[tokio::test]
+async fn revoked_while_prompting_signs_nothing() {
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let (info, token) = s
+        .pair_local_app(pairing(&e, Policy::Manual, &[]))
+        .await
+        .unwrap();
+    let err = act_during_prompt(&e, &s, &token, || async {
+        assert!(s.remove_app(&info.id).await.unwrap());
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err, opal_signer::server::REVOKED);
+}
+
+/// Pairing again rotates the token; a request from the old pairing that
+/// was waiting doesn't carry on as the new one.
+#[tokio::test]
+async fn a_request_from_an_earlier_pairing_signs_nothing() {
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let (_, token) = s
+        .pair_local_app(pairing(&e, Policy::Manual, &[]))
+        .await
+        .unwrap();
+    let err = act_during_prompt(&e, &s, &token, || async {
+        s.pair_local_app(pairing(&e, Policy::Manual, &[]))
+            .await
+            .unwrap();
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err, opal_signer::server::REVOKED);
+}
+
+/// The kill switch refuses what is already waiting, not just what comes next.
+#[tokio::test]
+async fn kill_switch_while_prompting_signs_nothing() {
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let (_, token) = s
+        .pair_local_app(pairing(&e, Policy::Manual, &[]))
+        .await
+        .unwrap();
+    let err = act_during_prompt(&e, &s, &token, || async {
+        s.set_online(false).await;
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err, opal_signer::server::STOPPED);
+    assert!(!s.is_answering());
+    s.set_online(true).await;
+    assert!(s.is_answering());
+}
+
+#[tokio::test]
+async fn dismissing_an_apps_prompts_refuses_its_request() {
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let (info, token) = s
+        .pair_local_app(pairing(&e, Policy::Manual, &[]))
+        .await
+        .unwrap();
+    let mut rx = e.prompts.subscribe();
+    let (s2, t2, account) = (s.clone(), token.clone(), e.account);
+    let pending = tokio::spawn(async move { sign(&s2, &t2, account, 30078).await });
+    while !matches!(rx.recv().await, Ok(PromptEvent::Opened { .. })) {}
+    assert_eq!(e.prompts.dismiss_for("someone-else"), 0);
+    assert_eq!(e.prompts.dismiss_for(&info.id), 1);
+    assert!(pending.await.unwrap().is_err());
+    assert!(e.prompts.pending().is_empty());
+}
