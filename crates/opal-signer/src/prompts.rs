@@ -110,11 +110,42 @@ impl PromptHub {
     }
 
     /// Answer a prompt. Returns `false` if it no longer exists.
+    ///
+    /// A remembered answer is the app's answer for this method and kind, not
+    /// just for this one request, so it also answers that app's other waiting
+    /// prompts of the same shape. They are one decision: the rule it saves
+    /// already covers them, and a client that connects to several relays at
+    /// once (or reconnects and re-challenges every relay) otherwise arrives as
+    /// a burst of prompts for the same thing.
     pub fn answer(&self, id: &str, answer: PromptAnswer) -> bool {
-        let Some((_, tx)) = lock(&self.pending).remove(id) else {
-            return false;
+        let (tx, closed) = {
+            let mut pending = lock(&self.pending);
+            let Some((prompt, tx)) = pending.remove(id) else {
+                return false;
+            };
+            let mut closed = vec![id.to_string()];
+            if answer.remember != Remember::Once {
+                let same: Vec<String> = pending
+                    .iter()
+                    .filter(|(_, (p, _))| {
+                        p.request.connection_id == prompt.request.connection_id
+                            && p.request.method == prompt.request.method
+                            && p.request.kind == prompt.request.kind
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for other in same {
+                    if let Some((_, tx)) = pending.remove(&other) {
+                        let _ = tx.send(answer);
+                        closed.push(other);
+                    }
+                }
+            }
+            (tx, closed)
         };
-        let _ = self.events.send(PromptEvent::Closed { id: id.to_string() });
+        for id in closed {
+            let _ = self.events.send(PromptEvent::Closed { id });
+        }
         tx.send(answer).is_ok()
     }
 
@@ -161,5 +192,123 @@ impl PromptHub {
             .values()
             .filter(|(p, _)| p.request.connection_id == connection_id)
             .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use nostr_sdk::prelude::Keys;
+    use opal_core::config::Policy;
+
+    use crate::protocol::Method;
+
+    fn request(app: &str, kind: u16) -> ApprovalRequest {
+        ApprovalRequest {
+            connection_id: app.into(),
+            app_name: "Peridot".into(),
+            app_url: None,
+            app_image: None,
+            account: Keys::generate().public_key(),
+            policy: Policy::Basic,
+            method: Method::SignEvent,
+            kind: Some(kind),
+            event: None,
+            counterparty: None,
+            payload_len: None,
+        }
+    }
+
+    /// The asks run in their own tasks, so wait for them to be waiting.
+    async fn wait_for_pending(hub: &PromptHub, n: usize) {
+        for _ in 0..200 {
+            if hub.pending().len() == n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("{} prompts waiting, wanted {n}", hub.pending().len());
+    }
+
+    fn ask(
+        hub: &Arc<PromptHub>,
+        app: &str,
+        kind: u16,
+    ) -> tokio::task::JoinHandle<Option<PromptAnswer>> {
+        let hub = hub.clone();
+        let app = app.to_string();
+        tokio::spawn(async move { hub.ask(request(&app, kind)).await })
+    }
+
+    const REMEMBERED: PromptAnswer = PromptAnswer {
+        allow: true,
+        remember: Remember::OneHour,
+    };
+
+    /// A queued prompt nobody answers would hang the test instead of failing.
+    async fn answered(t: tokio::task::JoinHandle<Option<PromptAnswer>>) -> PromptAnswer {
+        tokio::time::timeout(Duration::from_secs(2), t)
+            .await
+            .expect("answered, not asked again")
+            .unwrap()
+            .expect("an answer came back")
+    }
+
+    #[tokio::test]
+    async fn a_remembered_answer_answers_the_apps_queued_prompts() {
+        let hub = Arc::new(PromptHub::default());
+        let relay_a = ask(&hub, "peridot", 22242);
+        let relay_b = ask(&hub, "peridot", 22242);
+        let other_app = ask(&hub, "anagram", 22242);
+        let blossom = ask(&hub, "peridot", 24242);
+        wait_for_pending(&hub, 4).await;
+
+        let id = hub
+            .pending()
+            .iter()
+            .find(|p| p.request.kind == Some(22242) && p.request.connection_id == "peridot")
+            .expect("a relay login")
+            .id
+            .clone();
+        assert!(hub.answer(&id, REMEMBERED));
+
+        // The same app's other relay logins are the same answer.
+        for t in [relay_a, relay_b] {
+            let answer = answered(t).await;
+            assert!(answer.allow);
+            assert_eq!(answer.remember, Remember::OneHour);
+        }
+        // Another kind, and another app, are different decisions.
+        assert_eq!(hub.pending().len(), 2);
+        assert!(!other_app.is_finished());
+        assert!(!blossom.is_finished());
+        assert!(
+            hub.pending()
+                .iter()
+                .any(|p| p.request.connection_id == "anagram")
+        );
+        assert!(hub.pending().iter().any(|p| p.request.kind == Some(24242)));
+    }
+
+    #[tokio::test]
+    async fn once_answers_only_that_request() {
+        let hub = Arc::new(PromptHub::default());
+        let first = ask(&hub, "peridot", 22242);
+        let second = ask(&hub, "peridot", 22242);
+        wait_for_pending(&hub, 2).await;
+
+        let id = hub.pending()[0].id.clone();
+        assert!(hub.answer(
+            &id,
+            PromptAnswer {
+                allow: true,
+                remember: Remember::Once,
+            }
+        ));
+        assert!(first.await.unwrap().is_some());
+        assert!(!second.is_finished(), "the other one still asks");
+        assert_eq!(hub.pending().len(), 1);
     }
 }

@@ -314,6 +314,68 @@ async fn relay_auth_asks_even_under_basic() {
 }
 
 #[tokio::test]
+async fn one_remembered_answer_clears_an_apps_queued_relay_logins() {
+    // A client connecting to several relays at once (and re-challenging each
+    // one on reconnect) asks for the same thing several times over. The queue
+    // is one decision: answering it once answers the rest.
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let (info, token) = s
+        .pair_local_app(pairing(&e, Policy::Basic, &[]))
+        .await
+        .unwrap();
+
+    let answerer = {
+        let prompts = e.prompts.clone();
+        tokio::spawn(async move {
+            for _ in 0..400 {
+                if prompts.pending().len() == 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(prompts.pending().len(), 3, "three relay logins waiting");
+            assert!(
+                prompts
+                    .pending()
+                    .iter()
+                    .all(|p| p.request.kind == Some(22242)),
+                "all of them are relay logins"
+            );
+            let id = prompts.pending()[0].id.clone();
+            prompts.answer(
+                &id,
+                PromptAnswer {
+                    allow: true,
+                    remember: Remember::OneHour,
+                },
+            )
+        })
+    };
+
+    let (a, b, c) = tokio::join!(
+        sign(&s, &token, e.account, 22242),
+        sign(&s, &token, e.account, 22242),
+        sign(&s, &token, e.account, 22242),
+    );
+    assert!(answerer.await.unwrap(), "the prompt was answered");
+    for r in [a, b, c] {
+        r.expect("signed on the one answer");
+    }
+    assert!(e.prompts.pending().is_empty(), "nothing left to answer");
+
+    // One rule covers all three, and it lasts the hour that was asked for.
+    let now = Timestamp::now().as_secs();
+    let rules = s.store().unwrap().rules(&info.id).unwrap();
+    assert_eq!(rules.len(), 1);
+    let until = rules[0].until.unwrap();
+    assert!(
+        (now + 3500..=now + 3600).contains(&until),
+        "capped at an hour"
+    );
+}
+
+#[tokio::test]
 async fn full_trust_signs_declared_kinds_without_prompt() {
     let e = env().await;
     let s = signer(&e, true).await;
