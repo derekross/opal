@@ -541,9 +541,11 @@ Item {
             }
             ButtonGroup {
               width: parent.width
-              // Sensitive requests can't be remembered for long.
-              options: root.prompt && root.prompt.sensitive
-                ? U.rememberOptions.filter(function(o) { return ["once", "5m", "1h"].indexOf(o.value) !== -1 })
+              // opald decides what this request may be remembered with: a
+              // sensitive one never offers "always", and a relay login is the
+              // one kind offered longer than an hour.
+              options: root.prompt && root.prompt.remember_options
+                ? U.rememberOptions.filter(function(o) { return root.prompt.remember_options.indexOf(o.value) !== -1 })
                 : U.rememberOptions
               value: root.remember
               foreground: root.foreground

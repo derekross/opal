@@ -314,6 +314,75 @@ async fn relay_auth_asks_even_under_basic() {
 }
 
 #[tokio::test]
+async fn a_relay_login_is_offered_a_week_and_kept_for_one() {
+    // A client re-authenticates to every relay each time it reconnects, so an
+    // hour's answer means a prompt an hour for as long as it runs. A relay
+    // login is offered a week — and never "always".
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let (info, token) = s
+        .pair_local_app(pairing(&e, Policy::Basic, &[]))
+        .await
+        .unwrap();
+
+    let answerer = {
+        let prompts = e.prompts.clone();
+        tokio::spawn(async move {
+            for _ in 0..400 {
+                let waiting = prompts.pending();
+                if let Some(p) = waiting.first() {
+                    let offered: Vec<String> = p
+                        .remember_options
+                        .iter()
+                        .map(|r| {
+                            serde_json::to_value(r)
+                                .unwrap()
+                                .as_str()
+                                .unwrap()
+                                .to_string()
+                        })
+                        .collect();
+                    // The user picks the longest answer the prompt offers.
+                    prompts.answer(
+                        &p.id,
+                        PromptAnswer {
+                            allow: true,
+                            remember: Remember::Always,
+                        },
+                    );
+                    return offered;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Vec::new()
+        })
+    };
+
+    let (signed, offered) = tokio::join!(sign(&s, &token, e.account, 22242), answerer);
+    signed.unwrap();
+    assert_eq!(
+        offered.unwrap(),
+        vec!["once", "5m", "1h", "1d", "1w"],
+        "a week on offer, and no always"
+    );
+
+    // Even an asked-for "always" is held to that week.
+    let now = Timestamp::now().as_secs();
+    let rules = s.store().unwrap().rules(&info.id).unwrap();
+    assert_eq!(rules.len(), 1);
+    let until = rules[0].until.expect("a week, not forever");
+    assert!(
+        (now + 7 * 86_400 - 60..=now + 7 * 86_400).contains(&until),
+        "a week from now, got {until}"
+    );
+
+    // The next login rides the saved rule instead of asking again.
+    sign(&s, &token, e.account, 22242).await.unwrap();
+    assert!(e.prompts.pending().is_empty());
+    assert_eq!(last_activity(&s).await.unwrap().source, Source::Rule);
+}
+
+#[tokio::test]
 async fn full_trust_signs_declared_kinds_without_prompt() {
     let e = env().await;
     let s = signer(&e, true).await;

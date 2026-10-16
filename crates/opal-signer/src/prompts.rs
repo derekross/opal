@@ -19,8 +19,9 @@ pub struct Prompt {
     pub seq: u64,
     pub created_at: u64,
     pub kind_label: Option<String>,
-    /// Sensitive requests (credentials, overwrites…) can't be remembered long.
-    pub sensitive: bool,
+    /// The answers this request may be remembered with. A sensitive request is
+    /// never offered *always*, and nothing longer than its cap.
+    pub remember_options: Vec<Remember>,
     #[serde(flatten)]
     pub request: ApprovalRequest,
 }
@@ -93,7 +94,7 @@ impl PromptHub {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             created_at: Timestamp::now().as_secs(),
             kind_label: request.kind.map(kinds::label),
-            sensitive: crate::permissions::is_sensitive(&request.method, request.kind),
+            remember_options: crate::permissions::remember_options(&request.method, request.kind),
             request,
         };
         let (tx, rx) = oneshot::channel();

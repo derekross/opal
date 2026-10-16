@@ -31,7 +31,7 @@ pub const BASIC_KINDS: &[u16] = &[
 /// Kinds a client can never get blanket, long-lived permission for: they
 /// overwrite or destroy state, move money, or act as credentials. Requests
 /// for them via `perms`/`nip:<n>` are ignored and remembered answers are
-/// capped at one hour.
+/// capped by [`remember_cap`] — an hour, or a week for a relay login.
 pub const SENSITIVE_KINDS: &[u16] = &[
     0,     // profile
     3,     // follow list
@@ -57,11 +57,55 @@ pub const SENSITIVE_KINDS: &[u16] = &[
 /// tokens or backdate events behind your back.
 pub const AUTO_MAX_SKEW: u64 = 600;
 
+/// The longest a remembered answer may last for the other sensitive kinds:
+/// enough to get through a burst of requests, not enough to stand for a
+/// session.
+pub const SENSITIVE_MAX_REMEMBER_SECS: u64 = 3_600;
+
+/// The relay login (NIP-42 AUTH) kind.
+pub const RELAY_AUTH: u16 = 22242;
+
+/// Relay logins get the longest leash of the sensitive kinds. A client
+/// authenticates to each of its relays separately and re-challenges every one
+/// of them on reconnect, so an hour means a prompt an hour for as long as it
+/// runs; a week covers a session without leaving a login for a relay the user
+/// signed off on once as standing authority.
+pub const RELAY_AUTH_MAX_REMEMBER_SECS: u64 = 7 * 86_400;
+
 pub fn is_sensitive(method: &Method, kind: Option<u16>) -> bool {
     match method {
         Method::SignEvent => kind.is_none_or(|k| SENSITIVE_KINDS.contains(&k)),
         _ => false,
     }
+}
+
+/// The longest a remembered answer may last for this request: `None` when the
+/// request isn't sensitive, so nothing caps it.
+pub fn remember_cap(method: &Method, kind: Option<u16>) -> Option<u64> {
+    if !is_sensitive(method, kind) {
+        return None;
+    }
+    Some(if kind == Some(RELAY_AUTH) {
+        RELAY_AUTH_MAX_REMEMBER_SECS
+    } else {
+        SENSITIVE_MAX_REMEMBER_SECS
+    })
+}
+
+/// The answers a prompt may offer for this request: everything up to
+/// [`remember_cap`], and never *always* for something sensitive.
+pub fn remember_options(method: &Method, kind: Option<u16>) -> Vec<Remember> {
+    let cap = remember_cap(method, kind);
+    Remember::ALL
+        .into_iter()
+        .filter(|r| match (cap, r.secs()) {
+            // Not sensitive: any answer, including forever.
+            (None, _) => true,
+            // "Once" is not a remembered answer, so no cap applies to it.
+            (Some(_), None) => true,
+            (Some(cap), Some(secs)) => secs <= cap,
+        })
+        .collect()
 }
 
 /// How long an answer to a prompt is remembered.
@@ -82,17 +126,36 @@ pub enum Remember {
 }
 
 impl Remember {
+    /// The answers in the order a prompt offers them.
+    pub const ALL: [Remember; 6] = [
+        Self::Once,
+        Self::FiveMinutes,
+        Self::OneHour,
+        Self::OneDay,
+        Self::OneWeek,
+        Self::Always,
+    ];
+
+    /// How long the answer lasts, in seconds: `Once` isn't remembered at all,
+    /// and `Always` outlasts any cap.
+    pub fn secs(self) -> Option<u64> {
+        match self {
+            Self::Once => None,
+            Self::Always => Some(u64::MAX),
+            Self::FiveMinutes => Some(5 * 60),
+            Self::OneHour => Some(3_600),
+            Self::OneDay => Some(86_400),
+            Self::OneWeek => Some(7 * 86_400),
+        }
+    }
+
     /// `None` = don't store a rule; `Some(None)` = forever; `Some(Some(t))` = until t.
     pub fn until(self, now: u64) -> Option<Option<u64>> {
-        let secs = match self {
-            Self::Once => return None,
-            Self::Always => return Some(None),
-            Self::FiveMinutes => 5 * 60,
-            Self::OneHour => 3600,
-            Self::OneDay => 86_400,
-            Self::OneWeek => 7 * 86_400,
-        };
-        Some(Some(now + secs))
+        match self {
+            Self::Once => None,
+            Self::Always => Some(None),
+            _ => Some(self.secs().map(|secs| now + secs)),
+        }
     }
 }
 
@@ -379,6 +442,52 @@ mod tests {
         assert_eq!(Remember::Once.until(10), None);
         assert_eq!(Remember::Always.until(10), Some(None));
         assert_eq!(Remember::OneHour.until(10), Some(Some(3610)));
+        assert_eq!(Remember::OneWeek.secs(), Some(7 * 86_400));
+        assert_eq!(Remember::Once.secs(), None, "not remembered at all");
+        assert!(Remember::Always.secs().unwrap() > RELAY_AUTH_MAX_REMEMBER_SECS);
+    }
+
+    #[test]
+    fn a_relay_login_can_be_remembered_for_a_week_but_never_forever() {
+        assert_eq!(
+            remember_options(&Method::SignEvent, Some(RELAY_AUTH)),
+            vec![
+                Remember::Once,
+                Remember::FiveMinutes,
+                Remember::OneHour,
+                Remember::OneDay,
+                Remember::OneWeek,
+            ],
+            "a relay login: a week at most, and no always"
+        );
+        assert_eq!(
+            remember_cap(&Method::SignEvent, Some(RELAY_AUTH)),
+            Some(7 * 86_400)
+        );
+        // The rest of the sensitive kinds are unchanged.
+        for k in [13, 14, 24242, 27235] {
+            assert_eq!(
+                remember_options(&Method::SignEvent, Some(k)),
+                vec![Remember::Once, Remember::FiveMinutes, Remember::OneHour],
+                "kind {k} is an hour at most"
+            );
+            assert_eq!(remember_cap(&Method::SignEvent, Some(k)), Some(3_600));
+        }
+        // Nothing caps an everyday kind, or a method that isn't a signature.
+        for (method, kind) in [
+            (Method::SignEvent, Some(1)),
+            (Method::Nip44Decrypt, None),
+            (Method::GetPublicKey, None),
+        ] {
+            assert_eq!(remember_options(&method, kind), Remember::ALL.to_vec());
+            assert_eq!(remember_cap(&method, kind), None);
+        }
+        // A bare `sign_event` is any kind, so it stays at an hour.
+        assert_eq!(remember_cap(&Method::SignEvent, None), Some(3_600));
+        assert_eq!(
+            remember_options(&Method::SignEvent, None),
+            vec![Remember::Once, Remember::FiveMinutes, Remember::OneHour]
+        );
     }
 
     #[test]
