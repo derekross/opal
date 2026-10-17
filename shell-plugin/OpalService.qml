@@ -516,7 +516,10 @@ Item {
   }
 
   // `omarchy-shell opal <fn>` from scripts and keybindings.
+  // Off for the copy a widget runs itself on a custom bar.
+  property bool ipcEnabled: true
   IpcHandler {
+    enabled: root.ipcEnabled
     target: "opal"
     function panel(): string { root.panelToggleRequested(); return "ok" }
     function tab(name: string): string { root.tabRequested(name); return "ok" }

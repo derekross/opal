@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
@@ -16,13 +17,51 @@ Panel {
     if (!svc && bar && bar.shell && typeof bar.shell.serviceFor === "function")
       svc = bar.shell.serviceFor(root.moduleName || "derekross.opal")
   }
-  Component.onCompleted: findService()
+  Component.onCompleted: { findService(); checkApproval() }
   onBarChanged: findService()
   Timer {
     interval: 500
     running: !root.svc
     repeat: true
     onTriggered: root.findService()
+  }
+
+  // ── Third-party bars ─────────────────────────────────────────
+  // The shell hands plugin services only to its built-in bar. On a custom
+  // bar serviceFor() stays null, so (with the user's OK) the widget runs its
+  // own OpalService, which talks to opald directly.
+  property bool serviceBlocked: false   // no shell service after a grace period
+  property bool approved: false
+  property bool approvalChecked: false
+  readonly property string approvalFile:
+    (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/opal/third-party-bar-approved"
+  readonly property bool needsApproval: serviceBlocked && approvalChecked && !approved
+
+  Timer {
+    interval: 3000
+    running: !root.svc && !root.serviceBlocked
+    onTriggered: if (!root.svc) root.serviceBlocked = true
+  }
+  Process {
+    id: checkProc
+    command: ["/usr/bin/test", "-f", root.approvalFile]
+    onExited: function(code) { root.approved = code === 0; root.approvalChecked = true }
+  }
+  Process {
+    id: approveProc
+    onExited: function(code) { if (code === 0) root.approved = true }
+  }
+  function checkApproval() { checkProc.running = true }
+  function approve() {
+    approveProc.command = ["/usr/bin/sh", "-c",
+      'umask 077 && /usr/bin/mkdir -p "$(/usr/bin/dirname "$1")" && /usr/bin/date +%s > "$1"',
+      "sh", root.approvalFile]
+    approveProc.running = true
+  }
+  Loader {
+    active: root.serviceBlocked && root.approved
+    sourceComponent: OpalService { ipcEnabled: false }
+    onLoaded: if (!root.svc) root.svc = item
   }
 
   // `omarchy-shell opal panel` (e.g. from a keybinding) toggles the popup on
@@ -61,6 +100,7 @@ Panel {
     active: root.attention > 0
     dimmed: !root.daemonUp || root.locked
     tooltipText: {
+      if (root.needsApproval) return "Opal: click to allow it on this custom bar"
       if (root.svc && root.svc.keyringLocked) return "Opal: waiting for your keyring to be unlocked"
       if (!root.daemonUp) return "Opal isn't running"
       if (root.attention > 0) return root.attention + " waiting for you"
@@ -106,6 +146,8 @@ Panel {
       id: content
       anchors.fill: parent
       svc: root.svc
+      needsApproval: root.needsApproval
+      onApproveRequested: root.approve()
       foreground: root.foreground
       urgent: root.urgent
       panelOpen: root.opened

@@ -17,6 +17,11 @@ Item {
   readonly property string fontFamily: Style.font.family
 
   signal closeRequested()
+  signal approveRequested()
+
+  // Set by the widget when the bar is a third-party bar: the shell won't
+  // give it Opal's service, so Opal asks before connecting itself.
+  property bool needsApproval: false
 
   property alias keyTarget: keyCatcher
   property string tab: "apps"
@@ -87,6 +92,70 @@ Item {
       var i = 0
       for (; i < root.tabs.length; i++) if (root.tabs[i].value === root.tab) break
       root.tab = root.tabs[(i + dx + root.tabs.length) % root.tabs.length].value
+    }
+
+    Rectangle {
+      anchors.fill: parent
+      z: 100
+      visible: root.needsApproval
+      color: Qt.rgba(Color.popups.background.r, Color.popups.background.g, Color.popups.background.b, 1)
+      MouseArea { anchors.fill: parent }
+      BorderSurface {
+        id: approvalCard
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.margins: Style.space(12)
+        height: approvalColumn.implicitHeight + Style.space(24)
+        radius: Style.cornerRadius
+        color: Qt.rgba(Color.popups.background.r, Color.popups.background.g, Color.popups.background.b, 1)
+        borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+      Column {
+        id: approvalColumn
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.margins: Style.space(12)
+        spacing: Style.space(8)
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.Wrap
+          color: root.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+          text: "Custom bar detected"
+        }
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.Wrap
+          color: root.dim
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+          text: "You're using a third-party bar, so Omarchy doesn't share Opal's background connection with it. "
+            + "Allow Opal to connect to its service (opald) directly from this bar? "
+            + "It only talks to the local opald socket."
+        }
+        Row {
+          spacing: Style.space(8)
+          Button {
+            text: "Allow"
+            iconText: "󰄬"
+            bordered: true
+            foreground: root.foreground
+            onClicked: root.approveRequested()
+          }
+          Button {
+            text: "Not now"
+            bordered: true
+            foreground: root.foreground
+            onClicked: root.closeRequested()
+          }
+        }
+      }
+      }
     }
 
     Flickable {
