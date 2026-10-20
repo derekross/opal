@@ -28,6 +28,10 @@ Item {
   property var status: ({})
   readonly property bool locked: status.locked !== false
   readonly property bool hasAccounts: status.has_accounts === true
+  // The daemon couldn't read the keyring: the accounts it lists come from its
+  // own database, and nothing that needs a key can work. Kept separate from
+  // "no accounts" so the panel can say which one it is.
+  readonly property bool keyringOk: status.keyring_ok !== false
   readonly property var identity: status.identity || ({})
   readonly property bool readOnly: identity.mode === "read-only" && !!identity.npub
   // Something to show: a local key, or an npub being watched.
@@ -46,8 +50,9 @@ Item {
   property var playStats: ({})
   // Something can sign: a key in Opal, or a connected external signer.
   // Watching someone is read-only, so nothing that writes is offered then.
-  readonly property bool canSign: (identity.mode === "external" && !!identity.npub)
-    || (identity.mode !== "read-only" && identity.mode !== "external" && hasAccounts)
+  // A keyring that can't be read leaves the keys unusable, listed or not.
+  readonly property bool canSign: keyringOk && ((identity.mode === "external" && !!identity.npub)
+    || (identity.mode !== "read-only" && identity.mode !== "external" && hasAccounts))
   // DMs can only be read with the key of the profile in use stored in Opal
   // (not a read-only profile, not an external signer).
   readonly property bool canReadDms: hasAccounts && !readOnly && identity.mode !== "external"

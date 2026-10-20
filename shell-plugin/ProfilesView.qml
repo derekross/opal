@@ -134,6 +134,19 @@ Column {
     })
   }
 
+  // The keys are listed but can't be used: say so, rather than leaving the
+  // list looking normal or the page looking like a fresh install.
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
+    visible: !!svc && !svc.keyringOk
+    wrapMode: Text.Wrap
+    color: root.urgent
+    font.family: Style.font.family
+    font.pixelSize: Style.font.bodySmall
+    text: "Opal can't read your keyring right now. The keys below can't sign until it can — restart the keyring, then Opal."
+  }
+
   Repeater {
     model: root.profiles
     delegate: CursorSurface {

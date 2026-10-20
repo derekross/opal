@@ -675,6 +675,9 @@ fn print_status(s: &Value) {
         }
     );
     let pending = s["pending_prompts"].as_u64().unwrap_or(0);
+    if s["keyring_ok"] == json!(false) {
+        println!("Keyring:  can't be read — the accounts below can't sign until it is back");
+    }
     if pending > 0 {
         println!("Waiting:  {pending} request(s) — see `opal prompts`");
     }
