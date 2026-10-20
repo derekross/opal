@@ -36,3 +36,53 @@ async fn real_keyring_roundtrip() {
             .is_none()
     );
 }
+
+/// The store on its own, without the vault: every operation goes to the Secret
+/// Service with no passphrase involved, so it runs against a keyring that
+/// already holds accounts. The item is removed again at the end.
+#[tokio::test]
+#[ignore = "needs a running Secret Service"]
+async fn real_store_roundtrip() {
+    let store = SecretStore::keyring().await.unwrap();
+    let id = format!("test-{}", Keys::generate().public_key().to_hex());
+
+    store
+        .put(ItemKind::ConnKey, &id, "opal integration test", "not-a-key")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get(ItemKind::ConnKey, &id)
+            .await
+            .unwrap()
+            .map(|s| s.to_string())
+            .as_deref(),
+        Some("not-a-key")
+    );
+    assert!(
+        store
+            .list(ItemKind::ConnKey)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(k, _)| k == &id),
+        "the new item is listed"
+    );
+
+    store.delete(ItemKind::ConnKey, &id).await.unwrap();
+    assert!(
+        store.get(ItemKind::ConnKey, &id).await.unwrap().is_none(),
+        "deleted"
+    );
+    assert!(
+        !store
+            .list(ItemKind::ConnKey)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(k, _)| k == &id)
+    );
+
+    // The keyring is still readable afterwards: the client is still live.
+    assert!(!store.is_locked().await.unwrap());
+}
