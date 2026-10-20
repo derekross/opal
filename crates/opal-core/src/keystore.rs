@@ -13,8 +13,10 @@
 //! [`SecretStore::is_locked`] and [`SecretStore::unlock`].
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use zeroize::Zeroizing;
 
 use crate::Result;
@@ -54,7 +56,13 @@ impl ItemKind {
 
 pub enum SecretStore {
     /// Items tagged `application = <app>`.
-    Keyring(oo7::Keyring, &'static str),
+    Keyring {
+        /// The Secret Service client. Its session lives in the daemon, so a
+        /// dead one is swapped for a fresh client on the first failed read
+        /// (see `attempt`).
+        client: RwLock<Arc<oo7::Keyring>>,
+        app: &'static str,
+    },
     /// In-process store for tests.
     Memory(Mutex<BTreeMap<(ItemKind, String), Zeroizing<String>>>),
 }
@@ -67,7 +75,10 @@ impl SecretStore {
 
     /// Another app's items in the default keyring.
     pub async fn keyring_for(app: crate::paths::AppDirs) -> Result<Self> {
-        Ok(Self::Keyring(oo7::Keyring::new().await?, app.name))
+        Ok(Self::Keyring {
+            client: RwLock::new(Arc::new(oo7::Keyring::new().await?)),
+            app: app.name,
+        })
     }
 
     pub fn memory() -> Self {
@@ -78,7 +89,9 @@ impl SecretStore {
     /// until it's unlocked (`org.freedesktop.Secret.Error.IsLocked`).
     pub async fn is_locked(&self) -> Result<bool> {
         match self {
-            Self::Keyring(k, _) => Ok(k.is_locked().await?),
+            Self::Keyring { client, .. } => {
+                Self::attempt(client, |k| async move { k.is_locked().await }).await
+            }
             Self::Memory(_) => Ok(false),
         }
     }
@@ -88,8 +101,39 @@ impl SecretStore {
     /// it is an error.
     pub async fn unlock(&self) -> Result<()> {
         match self {
-            Self::Keyring(k, _) => Ok(k.unlock().await?),
+            Self::Keyring { client, .. } => {
+                Self::attempt(client, |k| async move { k.unlock().await }).await
+            }
             Self::Memory(_) => Ok(()),
+        }
+    }
+
+    /// Run one Secret Service operation, reconnecting once if the stored
+    /// client no longer has a session with the daemon.
+    ///
+    /// The session lives in the daemon, not in the client: when gnome-keyring
+    /// crashes or is restarted, the session path the client holds is gone and
+    /// every read fails with it. opald runs for weeks at a time, so a dead
+    /// session has to heal itself — the first failed operation builds a new
+    /// client and tries once more, and only a second failure is reported.
+    async fn attempt<T, F, Fut>(client: &RwLock<Arc<oo7::Keyring>>, op: F) -> Result<T>
+    where
+        F: Fn(Arc<oo7::Keyring>) -> Fut,
+        Fut: Future<Output = oo7::Result<T>>,
+    {
+        let cached = client.read().await.clone();
+        match op(cached).await {
+            Ok(value) => Ok(value),
+            // A lock, a dismissed prompt, a missing item: states the user or
+            // the data is in, not a dead session. A new client would hit the
+            // same wall, so only a lost session is worth reconnecting for.
+            Err(e) if !session_gone(&e) => Err(e.into()),
+            Err(first) => {
+                tracing::warn!("the secret service session is gone ({first}); reconnecting");
+                let fresh = Arc::new(oo7::Keyring::new().await?);
+                *client.write().await = fresh.clone();
+                Ok(op(fresh).await?)
+            }
         }
     }
 
@@ -103,9 +147,17 @@ impl SecretStore {
 
     pub async fn put(&self, kind: ItemKind, id: &str, label: &str, secret: &str) -> Result<()> {
         match self {
-            Self::Keyring(k, app) => {
-                k.create_item(label, &Self::attributes(app, kind, id), secret, true)
-                    .await?
+            Self::Keyring { client, app } => {
+                let attributes = Self::attributes(app, kind, id);
+                Self::attempt(client, |k| {
+                    let attributes = attributes.clone();
+                    async move {
+                        k.create_item(label, &attributes, secret, true)
+                            .await
+                            .map(drop)
+                    }
+                })
+                .await?
             }
             Self::Memory(m) => {
                 m.lock()
@@ -118,12 +170,18 @@ impl SecretStore {
 
     pub async fn get(&self, kind: ItemKind, id: &str) -> Result<Option<Zeroizing<String>>> {
         match self {
-            Self::Keyring(k, app) => {
-                let items = k.search_items(&Self::attributes(app, kind, id)).await?;
-                match items.first() {
-                    Some(item) => Ok(Some(secret_text(&item.secret().await?))),
-                    None => Ok(None),
-                }
+            Self::Keyring { client, app } => {
+                let attributes = Self::attributes(app, kind, id);
+                Self::attempt(client, |k| {
+                    let attributes = attributes.clone();
+                    async move {
+                        match k.search_items(&attributes).await?.first() {
+                            Some(item) => Ok(Some(secret_text(&item.secret().await?))),
+                            None => Ok(None),
+                        }
+                    }
+                })
+                .await
             }
             Self::Memory(m) => Ok(m.lock().await.get(&(kind, id.to_string())).cloned()),
         }
@@ -132,20 +190,26 @@ impl SecretStore {
     /// All `(id, secret)` pairs of one kind.
     pub async fn list(&self, kind: ItemKind) -> Result<Vec<(String, Zeroizing<String>)>> {
         match self {
-            Self::Keyring(k, app) => {
+            Self::Keyring { client, app } => {
                 let query = HashMap::from([
                     ("application", app.to_string()),
                     ("kind", kind.as_str().to_string()),
                 ]);
-                let mut out = Vec::new();
-                for item in k.search_items(&query).await? {
-                    let Some(id) = item.attributes().await?.remove("id") else {
-                        continue;
-                    };
-                    out.push((id, secret_text(&item.secret().await?)));
-                }
-                out.sort_by(|a, b| a.0.cmp(&b.0));
-                Ok(out)
+                Self::attempt(client, |k| {
+                    let query = query.clone();
+                    async move {
+                        let mut out = Vec::new();
+                        for item in k.search_items(&query).await? {
+                            let Some(id) = item.attributes().await?.remove("id") else {
+                                continue;
+                            };
+                            out.push((id, secret_text(&item.secret().await?)));
+                        }
+                        out.sort_by(|a, b| a.0.cmp(&b.0));
+                        Ok(out)
+                    }
+                })
+                .await
             }
             Self::Memory(m) => Ok(m
                 .lock()
@@ -159,7 +223,14 @@ impl SecretStore {
 
     pub async fn delete(&self, kind: ItemKind, id: &str) -> Result<()> {
         match self {
-            Self::Keyring(k, app) => k.delete(&Self::attributes(app, kind, id)).await?,
+            Self::Keyring { client, app } => {
+                let attributes = Self::attributes(app, kind, id);
+                Self::attempt(client, |k| {
+                    let attributes = attributes.clone();
+                    async move { k.delete(&attributes).await }
+                })
+                .await?
+            }
             Self::Memory(m) => {
                 m.lock().await.remove(&(kind, id.to_string()));
             }
@@ -170,4 +241,49 @@ impl SecretStore {
 
 fn secret_text(secret: &oo7::Secret) -> Zeroizing<String> {
     Zeroizing::new(String::from_utf8_lossy(secret.as_bytes()).into_owned())
+}
+
+/// Whether the error means the client's session with the daemon is gone — a
+/// restart, a crash, a closed connection — rather than a state the user or the
+/// data is in.
+fn session_gone(e: &oo7::Error) -> bool {
+    match e {
+        oo7::Error::DBus(e) => matches!(
+            e,
+            oo7::dbus::Error::ZBus(_)
+                | oo7::dbus::Error::Service(oo7::dbus::ServiceError::NoSession(_))
+                | oo7::dbus::Error::Service(oo7::dbus::ServiceError::NoSuchObject(_))
+        ),
+        oo7::Error::File(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oo7::dbus::{Error as DBusError, ServiceError};
+
+    fn service(e: ServiceError) -> oo7::Error {
+        oo7::Error::DBus(DBusError::Service(e))
+    }
+
+    #[test]
+    fn only_a_lost_session_is_worth_reconnecting_for() {
+        // What a gnome-keyring restart leaves behind: the session the client
+        // holds no longer exists.
+        assert!(session_gone(&service(ServiceError::NoSession(
+            "gone".into()
+        ))));
+        assert!(session_gone(&service(ServiceError::NoSuchObject(
+            "gone".into()
+        ))));
+
+        // States, not dead sessions: a second client would hit the same wall,
+        // and reconnecting would ask the user again.
+        assert!(!session_gone(&service(ServiceError::IsLocked(
+            "locked".into()
+        ))));
+        assert!(!session_gone(&oo7::Error::DBus(DBusError::Dismissed)));
+        assert!(!session_gone(&oo7::Error::DBus(DBusError::Deleted)));
+    }
 }
