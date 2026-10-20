@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::{PublicKey, RelayUrl, ToBech32};
-use opal_core::accounts::Accounts;
+use opal_core::accounts::{AccountMeta, Accounts};
 use opal_core::config::Config;
 use opal_core::db::Db;
 use opal_core::ipc::IpcEvent;
@@ -298,34 +298,11 @@ impl App {
         // A snapshot: hold no lock while awaiting the others below.
         let cfg = self.config.read().await.clone();
         let current = self.accounts.current().ok().flatten();
-        // Only accounts whose key is actually in the keyring.
-        let in_keyring: Vec<String> = self
-            .vault
-            .accounts()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .map(|pk| pk.to_hex())
-            .collect();
-        let accounts: Vec<Value> = self
-            .accounts
-            .list()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|a| in_keyring.contains(&a.pubkey))
-            .map(|a| {
-                let npub = PublicKey::from_hex(&a.pubkey)
-                    .ok()
-                    .and_then(|pk| pk.to_bech32().ok());
-                let is_current = current.is_some_and(|c| c.to_hex() == a.pubkey);
-                let label = a.label();
-                let mut v = serde_json::to_value(&a).unwrap_or_default();
-                v["npub"] = json!(npub);
-                v["label"] = json!(label);
-                v["current"] = json!(is_current);
-                v
-            })
-            .collect();
+        let (accounts, keyring_ok) = status_accounts(
+            self.accounts.list().unwrap_or_default(),
+            current,
+            self.vault.accounts().await,
+        );
         // In read-only mode, who is being watched (profile from the notifications cache).
         let watched = cfg
             .identity
@@ -351,6 +328,11 @@ impl App {
             "online": self.is_online(),
             "has_accounts": !accounts.is_empty(),
             "accounts": accounts,
+            // False when the Secret Service couldn't be read just now: the
+            // rows above come from opald's own database, so they are listed
+            // but nothing that needs a key can work. The panel says so rather
+            // than showing an empty list and offering a fresh setup.
+            "keyring_ok": keyring_ok,
             "current_account": current.map(|c| c.to_hex()),
             // The bar's job is to label the profile and show the counts. An
             // external signer's `bunker://` link carries the secret that pairs
@@ -409,4 +391,105 @@ pub fn parse_relays(list: &[String]) -> Vec<RelayUrl> {
             }
         })
         .collect()
+}
+
+/// The account rows a status snapshot shows, and whether the keyring could be
+/// read at all.
+///
+/// Only accounts whose key is actually in the keyring are usable — a row whose
+/// key was removed elsewhere must not be offered. But a keyring that can't be
+/// read *right now* is not the same as no accounts: serving an empty list said
+/// "you have no keys" after a gnome-keyring restart, so the rows come from
+/// opald's own database and `keyring_ok: false` says why they can't be used.
+fn status_accounts(
+    rows: Vec<AccountMeta>,
+    current: Option<PublicKey>,
+    in_keyring: std::result::Result<Vec<PublicKey>, opal_core::Error>,
+) -> (Vec<Value>, bool) {
+    let in_keyring = match in_keyring {
+        Ok(keys) => Some(keys.iter().map(|pk| pk.to_hex()).collect::<Vec<_>>()),
+        Err(e) => {
+            tracing::warn!("cannot read the keyring: {e}");
+            None
+        }
+    };
+    let accounts = rows
+        .into_iter()
+        .filter(|a| {
+            in_keyring
+                .as_ref()
+                .is_none_or(|keys| keys.contains(&a.pubkey))
+        })
+        .map(|a| {
+            let npub = PublicKey::from_hex(&a.pubkey)
+                .ok()
+                .and_then(|pk| pk.to_bech32().ok());
+            let is_current = current.is_some_and(|c| c.to_hex() == a.pubkey);
+            let label = a.label();
+            let mut v = serde_json::to_value(&a).unwrap_or_default();
+            v["npub"] = json!(npub);
+            v["label"] = json!(label);
+            v["current"] = json!(is_current);
+            v
+        })
+        .collect();
+    (accounts, in_keyring.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::prelude::Keys;
+    use opal_core::accounts::Profile;
+
+    fn row(pk: &PublicKey) -> AccountMeta {
+        AccountMeta {
+            pubkey: pk.to_hex(),
+            nickname: None,
+            profile: Profile::default(),
+            fetched_at: None,
+            added_at: 0,
+        }
+    }
+
+    #[test]
+    fn only_accounts_whose_key_is_in_the_keyring_are_shown() {
+        let (a, b) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let rows = vec![row(&a), row(&b)];
+
+        let (shown, keyring_ok) = status_accounts(rows, Some(a), Ok(vec![a]));
+        assert!(keyring_ok);
+        assert_eq!(
+            shown.len(),
+            1,
+            "a row with no key in the keyring is not usable"
+        );
+        assert_eq!(shown[0]["pubkey"], json!(a.to_hex()));
+        assert_eq!(shown[0]["current"], json!(true));
+    }
+
+    #[test]
+    fn an_unreadable_keyring_keeps_the_rows_and_says_so() {
+        let (a, b) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let rows = vec![row(&a), row(&b)];
+
+        // What a gnome-keyring restart did to `vault.accounts()`: an error,
+        // which the snapshot used to swallow with `unwrap_or_default()`.
+        let (shown, keyring_ok) = status_accounts(
+            rows,
+            None,
+            Err(opal_core::Error::Invalid(
+                "the secret service went away".into(),
+            )),
+        );
+        assert!(
+            !keyring_ok,
+            "the snapshot must say the keyring is unreadable"
+        );
+        assert_eq!(
+            shown.len(),
+            2,
+            "an unreadable keyring must not read as \"you have no keys\""
+        );
+    }
 }
