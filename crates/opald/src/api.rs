@@ -975,7 +975,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             Ok(json!(
                 list.into_iter()
                     .map(|n| {
-                        let url = notification_url(opener, &n);
+                        let url = notification_url(&opener, &n);
                         let mut v = serde_json::to_value(&n).unwrap_or_default();
                         v["url"] = json!(url);
                         // For people without a name: an npub, not hex.
@@ -1033,7 +1033,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 .get(&account, &p.id)?
                 .ok_or(anyhow!("no such notification"))?;
             let opener = notify_opener(app).await;
-            let url = notification_url(opener, &n).ok_or(anyhow!("nothing to open"))?;
+            let url = notification_url(&opener, &n).ok_or(anyhow!("nothing to open"))?;
             crate::notify::open_url(&url);
             Ok(json!({"url": url}))
         }
@@ -1328,7 +1328,7 @@ async fn default_app_status(app: &App) -> Value {
 /// Where clicking a notification goes: the note itself for replies and
 /// mentions, the note it is about for reactions, reposts and zaps.
 fn notification_url(
-    opener: opal_notify::links::Opener,
+    opener: &opal_notify::links::Opener,
     n: &opal_notify::StoredNotification,
 ) -> Option<String> {
     use opal_notify::NotifType;
@@ -1336,14 +1336,14 @@ fn notification_url(
     match (n2.ntype, &n2.ref_id) {
         (NotifType::Dm, _) => None,
         (NotifType::Reply | NotifType::Mention, _) | (_, None) => opal_notify::links::event_link(
-            opener,
+            opener.clone(),
             &n2.id,
             Some(&n2.author),
             Some(n2.kind),
             n2.relay.as_deref(),
         ),
         (_, Some(r)) => opal_notify::links::event_link(
-            opener,
+            opener.clone(),
             r,
             n.ref_author.as_deref(),
             n.ref_kind,
