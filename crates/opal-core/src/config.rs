@@ -159,8 +159,10 @@ impl Default for NotificationTypes {
 pub struct NotificationsConfig {
     pub types: NotificationTypes,
     /// Where clicking a notification opens it: "default" (the desktop's
-    /// default Nostr app, see `default_app`) or a web client: primal,
-    /// jumble, coracle, nostrudel, ditto, nostrich, njump.
+    /// default Nostr app, see `default_app`), a web client: primal,
+    /// jumble, coracle, nostrudel, ditto, nostrich, njump — or a full
+    /// https:// URL for any other client, with an optional "{nevent}"
+    /// placeholder (e.g. "https://x.com/e/" or "?open={nevent}").
     pub client: String,
     /// Desktop id (e.g. `chrome-<id>-Default.desktop`) of the Nostr app
     /// picked in Settings for "default"; empty until one is picked.

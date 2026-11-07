@@ -91,7 +91,7 @@ pub async fn opener(cfg: &NotificationsConfig) -> Opener {
     }
     match snapshot(&cfg.default_app).await.opens_in {
         Some((scheme, _)) => Opener::Scheme(scheme),
-        None => Opener::Web(links::DEFAULT_APP_FALLBACK),
+        None => Opener::Web(links::DEFAULT_APP_FALLBACK.into()),
     }
 }
 

@@ -1,5 +1,7 @@
 //! Deep links that open a notification in a web client.
 
+use std::borrow::Cow;
+
 use nostr_sdk::prelude::*;
 
 /// The client id that opens notifications in the desktop's default Nostr
@@ -24,21 +26,35 @@ pub const CLIENTS: &[(&str, &str, &str)] = &[
 
 /// How a link starts: a web client's base URL, or a URI scheme the
 /// desktop hands to whichever app is registered for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Opener {
-    Web(&'static str),
+    Web(Cow<'static, str>),
     Scheme(&'static str),
 }
 
 /// The web client `client` names; unknown ids (and "Default app", which the
-/// caller resolves itself) get the first real web client.
-pub fn client_base(client: &str) -> &'static str {
+/// caller resolves itself) get the first real web client. `client` may
+/// also be a full https:// URL for any other client ("bring your own
+/// client"): the bech32 nevent is appended to it, or substituted into a
+/// `{nevent}` placeholder.
+pub fn client_base(client: &str) -> Cow<'static, str> {
+    let client = client.trim();
     CLIENTS
         .iter()
         .find(|(id, _, base)| *id == client && !base.is_empty())
-        .or_else(|| CLIENTS.iter().find(|(_, _, base)| !base.is_empty()))
-        .map(|(_, _, base)| *base)
-        .unwrap_or(DEFAULT_APP_FALLBACK)
+        .map(|(_, _, base)| Cow::Borrowed(*base))
+        .or_else(|| {
+            client
+                .starts_with("https://")
+                .then(|| Cow::Owned(client.to_string()))
+        })
+        .or_else(|| {
+            CLIENTS
+                .iter()
+                .find(|(_, _, base)| !base.is_empty())
+                .map(|(_, _, base)| Cow::Borrowed(*base))
+        })
+        .unwrap_or(Cow::Borrowed(DEFAULT_APP_FALLBACK))
 }
 
 /// Link to `event_id` in the web client `client`.
@@ -79,6 +95,7 @@ pub fn event_link(
     }
     let nevent = nev.to_bech32().ok()?;
     Some(match opener {
+        Opener::Web(base) if base.contains("{nevent}") => base.replace("{nevent}", &nevent),
         Opener::Web(base) => format!("{base}{nevent}"),
         Opener::Scheme(scheme) => format!("{scheme}:{nevent}"),
     })
@@ -120,6 +137,40 @@ mod tests {
             event_url(DEFAULT_APP, &id, None, None, None)
                 .unwrap()
                 .starts_with("https://primal.net/e/")
+        );
+    }
+
+    #[test]
+    fn brings_your_own_client() {
+        let id = "a".repeat(64);
+        let url = event_url("https://myclient.example/view/", &id, None, None, None).unwrap();
+        assert!(
+            url.starts_with("https://myclient.example/view/nevent1"),
+            "{url}"
+        );
+        let url = event_url(
+            "https://myclient.example/?open={nevent}",
+            &id,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            url.starts_with("https://myclient.example/?open=nevent1"),
+            "{url}"
+        );
+        // Only https:// counts as a custom client; anything else falls back.
+        assert!(
+            event_url("http://myclient.example/", &id, None, None, None)
+                .unwrap()
+                .starts_with("https://primal.net/e/")
+        );
+        // Stray whitespace (hand-edited config) can't smuggle a bad URL.
+        assert!(
+            event_url(" https://myclient.example/x/ ", &id, None, None, None)
+                .unwrap()
+                .starts_with("https://myclient.example/x/nevent1")
         );
     }
 

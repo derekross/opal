@@ -266,6 +266,23 @@ Column {
         }
       }
     }
+    // Any other client: the URL its events live at ({nevent} placeholders
+    // allowed). Empty when a pill is selected.
+    TextField {
+      width: parent.width - parent.leftPadding
+      placeholderText: "Custom client URL (https://…/e/ or ?open={nevent})"
+      text: {
+        var c = parent.n.client || ""
+        return c.indexOf("/") !== -1 ? c : ""
+      }
+      foreground: root.foreground
+      onAccepted: {
+        var t = text.trim()
+        if (t.indexOf("https://") === 0 && t !== parent.n.client)
+          root.svc.runGuarded("config.set", { notifications: { client: t } },
+            function(r) { root.svc.config = r; root.svc.refreshNotifications() })
+      }
+    }
     // "Default app": the installed apps that open Nostr links. Picking one
     // makes it the desktop's default for them, not just Opal's.
     Column {
