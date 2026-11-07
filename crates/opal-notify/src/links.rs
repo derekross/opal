@@ -19,6 +19,7 @@ pub const CLIENTS: &[(&str, &str, &str)] = &[
     ("nostrudel", "noStrudel", "https://nostrudel.ninja/#/n/"),
     ("ditto", "Ditto", "https://ditto.pub/"),
     ("nostrich", "Nostrich", "https://nostrich.org/e/"),
+    ("noswalls", "NosWalls", "https://noswalls.com/e/"),
     ("njump", "njump", "https://njump.me/"),
 ];
 
@@ -121,6 +122,12 @@ mod tests {
                 .unwrap()
                 .starts_with("https://primal.net/e/")
         );
+    }
+
+    #[test]
+    fn noswalls_is_a_client() {
+        let url = event_url("noswalls", &"a".repeat(64), None, None, None).unwrap();
+        assert!(url.starts_with("https://noswalls.com/e/nevent1"), "{url}");
     }
 
     #[test]
