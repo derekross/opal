@@ -100,6 +100,7 @@ async fn basic_policy_prompts_and_remembers() {
         PromptAnswer {
             allow: true,
             remember: Remember::OneHour,
+            confirmed: false,
         },
     );
     let (info, uri) = s
@@ -152,6 +153,7 @@ async fn remembered_denial_blocks_without_prompting() {
         PromptAnswer {
             allow: false,
             remember: Remember::Always,
+            confirmed: false,
         },
     );
     let (_, uri) = s
@@ -244,6 +246,7 @@ async fn nostrconnect_grants_become_rules() {
         PromptAnswer {
             allow: false,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     let app_keys = Keys::generate();
@@ -318,6 +321,7 @@ async fn forward_dated_and_auth_events_always_ask() {
         PromptAnswer {
             allow: false,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     let (_, uri) = s
@@ -424,6 +428,7 @@ async fn revoked_while_prompting_is_not_signed() {
             let allow = PromptAnswer {
                 allow: true,
                 remember: Remember::Once,
+                confirmed: false,
             };
             if prompt.request.method == Method::GetPublicKey {
                 prompts.answer(&prompt.id, allow);
@@ -461,6 +466,7 @@ async fn policy_downgrade_while_waiting_for_unlock_applies() {
         PromptAnswer {
             allow: false,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     let mut events = s.subscribe_events();

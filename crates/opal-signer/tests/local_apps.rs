@@ -193,6 +193,7 @@ async fn sign_within_declared_kinds_uses_rules() {
         PromptAnswer {
             allow: true,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     let (_, token) = s
@@ -234,6 +235,7 @@ async fn undeclared_kind_and_wrong_account_are_refused_before_approval() {
         PromptAnswer {
             allow: true,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     let (_, token) = s
@@ -253,7 +255,7 @@ async fn undeclared_kind_and_wrong_account_are_refused_before_approval() {
 }
 
 #[tokio::test]
-async fn sensitive_kind_prompts_and_is_remembered_for_an_hour_at_most() {
+async fn sensitive_kind_prompts_and_is_remembered_for_an_hour_without_the_passphrase() {
     let e = env().await;
     let s = signer(&e, true).await;
     let prompts = auto_answer(
@@ -261,6 +263,7 @@ async fn sensitive_kind_prompts_and_is_remembered_for_an_hour_at_most() {
         PromptAnswer {
             allow: true,
             remember: Remember::Always,
+            confirmed: false,
         },
     );
     let (info, token) = s
@@ -287,6 +290,62 @@ async fn sensitive_kind_prompts_and_is_remembered_for_an_hour_at_most() {
 }
 
 #[tokio::test]
+async fn confirmed_always_keeps_a_sensitive_kind_allowed_for_good() {
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let prompts = auto_answer(
+        e.prompts.clone(),
+        PromptAnswer {
+            allow: true,
+            remember: Remember::Always,
+            confirmed: true,
+        },
+    );
+    let (info, token) = s
+        .pair_local_app(pairing(&e, Policy::Basic, &[]))
+        .await
+        .unwrap();
+
+    sign(&s, &token, e.account, 24242).await.unwrap();
+    assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    let rules = s.store().unwrap().rules(&info.id).unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].kind, Some(24242), "only the kind that was asked");
+    assert_eq!(rules[0].until, None, "no expiry");
+
+    sign(&s, &token, e.account, 24242).await.unwrap();
+    assert_eq!(prompts.load(Ordering::SeqCst), 1, "remembered");
+    assert_eq!(last_activity(&s).await.unwrap().source, Source::Rule);
+    // Another sensitive kind still asks.
+    sign(&s, &token, e.account, 22242).await.unwrap();
+    assert_eq!(prompts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_sensitive_kind_can_be_denied_for_good_without_the_passphrase() {
+    let e = env().await;
+    let s = signer(&e, true).await;
+    let prompts = auto_answer(
+        e.prompts.clone(),
+        PromptAnswer {
+            allow: false,
+            remember: Remember::Always,
+            confirmed: false,
+        },
+    );
+    let (info, token) = s
+        .pair_local_app(pairing(&e, Policy::Basic, &[]))
+        .await
+        .unwrap();
+
+    assert!(sign(&s, &token, e.account, 24242).await.is_err());
+    let rules = s.store().unwrap().rules(&info.id).unwrap();
+    assert_eq!((rules[0].allow, rules[0].until), (false, None));
+    assert!(sign(&s, &token, e.account, 24242).await.is_err());
+    assert_eq!(prompts.load(Ordering::SeqCst), 1, "remembered");
+}
+
+#[tokio::test]
 async fn relay_auth_asks_even_under_basic() {
     // A relay login lets the app read what a relay keeps for you alone
     // (your DMs on an inbox relay), so it's sensitive under every policy
@@ -298,6 +357,7 @@ async fn relay_auth_asks_even_under_basic() {
         PromptAnswer {
             allow: true,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     for policy in [Policy::Basic, Policy::Manual] {
@@ -322,6 +382,7 @@ async fn full_trust_signs_declared_kinds_without_prompt() {
         PromptAnswer {
             allow: true,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     let (_, token) = s
@@ -346,6 +407,7 @@ async fn nip44_is_self_only_and_decrypt_asks() {
         PromptAnswer {
             allow: true,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
 
@@ -437,6 +499,7 @@ async fn dm_encrypts_to_a_peer_but_never_decrypts_one() {
         PromptAnswer {
             allow: true,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     let mut p = pairing(&e, Policy::Basic, &[(Method::Nip44Encrypt, None)]);
@@ -700,6 +763,7 @@ async fn denied_prompt_is_logged_with_its_reason() {
         PromptAnswer {
             allow: false,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     let (_, token) = s
@@ -739,6 +803,7 @@ where
         PromptAnswer {
             allow: true,
             remember: Remember::Once,
+            confirmed: false,
         },
     );
     pending.await.unwrap()

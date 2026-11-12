@@ -50,6 +50,14 @@ Item {
   readonly property bool signingIn: mode === "unlock" && !!svc && !svc.locked
 
   property string remember: "once"
+  // Allowing something sensitive (a login token, a private message, a
+  // profile overwrite…) for longer than an hour takes the passphrase.
+  readonly property bool needPass: mode === "prompt" && !!prompt && !!prompt.sensitive
+    && ["1d", "1w", "always"].indexOf(remember) !== -1
+  onNeedPassChanged: if (needPass) Qt.callLater(function() {
+    scroller.contentY = Math.max(0, scroller.contentHeight - scroller.height)
+    confirmField.forceActiveFocus()
+  }); else Qt.callLater(focusDefault)
   property bool showRaw: false
   property string policy: "basic"
   property var granted: ({})
@@ -70,10 +78,12 @@ Item {
   }
   function focusDefault() {
     if (mode === "unlock") passField.forceActiveFocus()
+    else if (needPass) confirmField.forceActiveFocus()
     else keyCatcher.forceActiveFocus()
   }
   function reset() {
     remember = "once"
+    confirmField.text = ""
     showRaw = false
     error = ""
     busy = false
@@ -109,10 +119,24 @@ Item {
 
   function answer(allow) {
     if (!prompt || busy || (allow && !armed)) return
+    var params = { id: prompt.id, allow: allow, remember: remember }
+    if (allow && needPass) {
+      if (confirmField.text === "") {
+        error = "Enter your Opal passphrase to allow this for longer than an hour."
+        confirmField.forceActiveFocus()
+        return
+      }
+      params.passphrase = confirmField.text
+    }
     busy = true
-    svc.call("prompts.answer", { id: prompt.id, allow: allow, remember: remember }, function(err) {
+    error = ""
+    svc.call("prompts.answer", params, function(err) {
       root.busy = false
-      if (err) root.error = err
+      confirmField.text = ""
+      if (err) {
+        root.error = err
+        if (root.needPass) Qt.callLater(function() { confirmField.forceActiveFocus() })
+      }
       root.svc.refreshPrompts()
     })
   }
@@ -541,13 +565,33 @@ Item {
             }
             ButtonGroup {
               width: parent.width
-              // Sensitive requests can't be remembered for long.
-              options: root.prompt && root.prompt.sensitive
-                ? U.rememberOptions.filter(function(o) { return ["once", "5m", "1h"].indexOf(o.value) !== -1 })
-                : U.rememberOptions
+              options: U.rememberOptions
               value: root.remember
               foreground: root.foreground
               onChanged: function(v) { root.remember = v }
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              visible: root.needPass
+              wrapMode: Text.Wrap
+              color: root.urgent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              text: (root.prompt ? root.prompt.app_name : "This app") + " could then do this without asking"
+                + (root.remember === "always" ? ", until you forget the answer under Apps" : "")
+                + ". Approving that takes your Opal passphrase; denying doesn't."
+            }
+            Field {
+              id: confirmField
+              width: parent.width
+              visible: root.needPass
+              password: true
+              placeholderText: "Opal passphrase"
+              foreground: root.foreground
+              enabled: !root.busy
+              onAccepted: root.answer(true)
+              Keys.onEscapePressed: root.dismiss()
             }
           }
 

@@ -73,7 +73,8 @@ enum Cmd {
     /// Approve a waiting request.
     Approve {
         id: String,
-        /// once, 5m, 1h, 1d, 1w or always.
+        /// once, 5m, 1h, 1d, 1w or always. Longer than 1h asks for the
+        /// passphrase when the request is a sensitive one.
         #[arg(long, default_value = "once")]
         remember: String,
     },
@@ -531,12 +532,17 @@ async fn run() -> Result<()> {
 }
 
 async fn answer(c: &mut Conn, id: &str, allow: bool, remember: &str) -> Result<()> {
-    let r = c
-        .call(
-            "prompts.answer",
-            json!({"id": id, "allow": allow, "remember": remember}),
-        )
-        .await?;
+    let mut p = json!({"id": id, "allow": allow, "remember": remember});
+    let r = match c.call("prompts.answer", p.clone()).await {
+        // Allowing a sensitive request for longer than an hour.
+        Err(e) if e.to_string().contains("needs your Opal passphrase") => {
+            p["passphrase"] = json!(read_secret(
+                "Opal passphrase (needed to allow this for longer than an hour): "
+            )?);
+            c.call("prompts.answer", p).await?
+        }
+        r => r?,
+    };
     if r["answered"] != json!(true) {
         bail!("that request is no longer waiting");
     }

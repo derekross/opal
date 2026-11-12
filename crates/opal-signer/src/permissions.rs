@@ -30,8 +30,9 @@ pub const BASIC_KINDS: &[u16] = &[
 
 /// Kinds a client can never get blanket, long-lived permission for: they
 /// overwrite or destroy state, move money, or act as credentials. Requests
-/// for them via `perms`/`nip:<n>` are ignored and remembered answers are
-/// capped at one hour.
+/// for them via `perms`/`nip:<n>` are ignored, and an "allow" is remembered
+/// for [`SENSITIVE_MAX_REMEMBER`] at most unless the answer was confirmed
+/// with the passphrase.
 pub const SENSITIVE_KINDS: &[u16] = &[
     0,     // profile
     3,     // follow list
@@ -51,6 +52,10 @@ pub const SENSITIVE_KINDS: &[u16] = &[
     24242, // blossom auth
     27235, // http auth
 ];
+
+/// Longest (seconds) an "allow" for a sensitive request is remembered
+/// without the passphrase.
+pub const SENSITIVE_MAX_REMEMBER: u64 = 3600;
 
 /// Automatic approvals (policy or saved rule) only for events dated within
 /// this many seconds of now; anything else asks, so an app can't pre-mint
@@ -93,6 +98,11 @@ impl Remember {
             Self::OneWeek => 7 * 86_400,
         };
         Some(Some(now + secs))
+    }
+
+    /// Whether the answer is remembered for longer than `secs`.
+    pub fn outlasts(self, secs: u64) -> bool {
+        self.until(0).is_some_and(|u| u.is_none_or(|t| t > secs))
     }
 }
 
@@ -379,6 +389,16 @@ mod tests {
         assert_eq!(Remember::Once.until(10), None);
         assert_eq!(Remember::Always.until(10), Some(None));
         assert_eq!(Remember::OneHour.until(10), Some(Some(3610)));
+        for (r, long) in [
+            (Remember::Once, false),
+            (Remember::FiveMinutes, false),
+            (Remember::OneHour, false),
+            (Remember::OneDay, true),
+            (Remember::OneWeek, true),
+            (Remember::Always, true),
+        ] {
+            assert_eq!(r.outlasts(SENSITIVE_MAX_REMEMBER), long, "{r:?}");
+        }
     }
 
     #[test]

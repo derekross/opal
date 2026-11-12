@@ -7,7 +7,9 @@ use nostr_sdk::prelude::{PublicKey, Timestamp, UnsignedEvent};
 use opal_core::config::Policy;
 use serde::Serialize;
 
-use crate::permissions::{Evaluation, Rule, Source, evaluate, is_sensitive};
+use crate::permissions::{
+    Evaluation, Rule, SENSITIVE_MAX_REMEMBER, Source, evaluate, is_sensitive,
+};
 use crate::prompts::PromptHub;
 use crate::protocol::Method;
 use crate::store::SignerStore;
@@ -98,9 +100,11 @@ impl Approver for PolicyApprover {
                 return Decision::Deny(Source::Timeout, "no answer".into());
             };
             if let Some(mut until) = answer.remember.until(now) {
-                // Sensitive kinds are never remembered for more than an hour.
-                if is_sensitive(&req.method, req.kind) {
-                    until = Some(until.map_or(now + 3600, |t| t.min(now + 3600)));
+                // Allowing a sensitive kind for more than an hour takes the
+                // passphrase; without it the answer is cut down to the hour.
+                if answer.allow && !answer.confirmed && is_sensitive(&req.method, req.kind) {
+                    let cap = now + SENSITIVE_MAX_REMEMBER;
+                    until = Some(until.map_or(cap, |t| t.min(cap)));
                 }
                 let rule = Rule {
                     app_id: req.connection_id.clone(),

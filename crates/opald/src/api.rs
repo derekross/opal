@@ -10,7 +10,7 @@ use opal_core::config::{Config, Policy};
 use opal_core::import::{ImportOptions, parse_secret};
 use opal_kit::ipc::Peer;
 use opal_signer::kinds;
-use opal_signer::permissions::{Remember, Rule, expand_perms};
+use opal_signer::permissions::{Remember, Rule, SENSITIVE_MAX_REMEMBER, expand_perms};
 use opal_signer::protocol::Method;
 use opal_signer::store::ActivityQuery;
 use opal_signer::{LocalPairing, NostrConnectUri, Op, Outcome, PromptAnswer};
@@ -423,13 +423,24 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 allow: bool,
                 #[serde(default = "once")]
                 remember: Remember,
+                passphrase: Option<Zeroizing<String>>,
             }
             let p: P = parse(params)?;
+            // Letting an app do something sensitive for longer than an
+            // hour without asking weakens protection, like full trust
+            // does, so it takes the passphrase too.
+            let confirmed = p.allow
+                && p.remember.outlasts(SENSITIVE_MAX_REMEMBER)
+                && app.prompts.is_sensitive(&p.id) == Some(true);
+            if confirmed {
+                require_passphrase(app, p.passphrase.as_ref()).await?;
+            }
             let ok = app.prompts.answer(
                 &p.id,
                 PromptAnswer {
                     allow: p.allow,
                     remember: p.remember,
+                    confirmed,
                 },
             );
             Ok(json!({"answered": ok}))
@@ -2157,6 +2168,126 @@ mod tests {
             .unwrap();
         assert_eq!(activity[0]["source"], json!("user"));
         assert_eq!(activity[0]["kind"], json!(24242));
+    }
+
+    #[tokio::test]
+    async fn allowing_a_sensitive_kind_past_an_hour_needs_the_passphrase() {
+        let (app, pk) = test_app().await;
+        let exe = "/x/peridotd";
+        let token = pair(&app, exe, "basic", vec![]).await;
+        let mut rx = app.prompts.subscribe();
+        let answerer = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let Ok(PromptEvent::Opened { prompt }) = rx.recv().await else {
+                    panic!("no prompt");
+                };
+                assert!(prompt.sensitive);
+                let answer = |extra: Value| {
+                    let mut p = json!({"id": prompt.id, "allow": true});
+                    p.as_object_mut()
+                        .unwrap()
+                        .extend(extra.as_object().unwrap().clone());
+                    p
+                };
+                // Past an hour: refused without the passphrase or with a
+                // wrong one, and the request keeps waiting.
+                for remember in ["1d", "1w", "always"] {
+                    let err = call(
+                        &app,
+                        &ui(),
+                        "prompts.answer",
+                        answer(json!({"remember": remember})),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_eq!(
+                        err.to_string(),
+                        "this change needs your Opal passphrase",
+                        "{remember}"
+                    );
+                }
+                let err = call(
+                    &app,
+                    &ui(),
+                    "prompts.answer",
+                    answer(json!({"remember": "always", "passphrase": "nope"})),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(err.to_string(), "wrong passphrase");
+                assert_eq!(app.prompts.pending().len(), 1, "still waiting");
+                let r = call(
+                    &app,
+                    &ui(),
+                    "prompts.answer",
+                    answer(json!({"remember": "always", "passphrase": PW})),
+                )
+                .await
+                .unwrap();
+                assert_eq!(r["answered"], json!(true));
+            })
+        };
+        let who = peer(exe);
+        let sign = || {
+            call(
+                &app,
+                &who,
+                "app.sign",
+                json!({"token": token, "event": unsigned(pk, 24242)}),
+            )
+        };
+        sign().await.unwrap();
+        answerer.await.unwrap();
+        // Saved without an expiry, for that kind only; the next one is
+        // signed without asking.
+        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
+        let detail = call(&app, &ui(), "apps.get", json!({"id": apps[0]["id"]}))
+            .await
+            .unwrap();
+        let rules = detail["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        assert_eq!(rules[0]["kind"], json!(24242));
+        assert_eq!(rules[0]["allow"], json!(true));
+        assert_eq!(rules[0]["until"], Value::Null);
+        sign().await.unwrap();
+        let activity = call(&app, &ui(), "activity.list", json!(null))
+            .await
+            .unwrap();
+        assert_eq!(activity[0]["source"], json!("rule"));
+    }
+
+    #[tokio::test]
+    async fn short_answers_and_denials_need_no_passphrase() {
+        let exe = "/x/peridotd";
+        let kind = 24242;
+        for answer in [
+            json!({"allow": true, "remember": "1h"}),
+            json!({"allow": false, "remember": "always"}),
+        ] {
+            let (app, pk) = test_app().await;
+            let token = pair(&app, exe, "basic", vec![]).await;
+            let mut rx = app.prompts.subscribe();
+            let answerer = {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let Ok(PromptEvent::Opened { prompt }) = rx.recv().await else {
+                        panic!("no prompt");
+                    };
+                    let mut p = answer;
+                    p["id"] = json!(prompt.id);
+                    call(&app, &ui(), "prompts.answer", p).await.unwrap()
+                })
+            };
+            let _ = call(
+                &app,
+                &peer(exe),
+                "app.sign",
+                json!({"token": token, "event": unsigned(pk, kind)}),
+            )
+            .await;
+            assert_eq!(answerer.await.unwrap()["answered"], json!(true));
+        }
     }
 
     #[tokio::test]

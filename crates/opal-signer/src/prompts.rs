@@ -19,7 +19,8 @@ pub struct Prompt {
     pub seq: u64,
     pub created_at: u64,
     pub kind_label: Option<String>,
-    /// Sensitive requests (credentials, overwrites…) can't be remembered long.
+    /// Sensitive requests (credentials, overwrites…) are remembered for an
+    /// hour at most unless the answer is confirmed with the passphrase.
     pub sensitive: bool,
     #[serde(flatten)]
     pub request: ApprovalRequest,
@@ -29,6 +30,10 @@ pub struct Prompt {
 pub struct PromptAnswer {
     pub allow: bool,
     pub remember: Remember,
+    /// The passphrase was verified for this answer, which lets an "allow"
+    /// for a sensitive request be remembered for longer than an hour.
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +121,11 @@ impl PromptHub {
         };
         let _ = self.events.send(PromptEvent::Closed { id: id.to_string() });
         tx.send(answer).is_ok()
+    }
+
+    /// Whether a waiting prompt is for a sensitive request.
+    pub fn is_sensitive(&self, id: &str) -> Option<bool> {
+        lock(&self.pending).get(id).map(|(p, _)| p.sensitive)
     }
 
     /// Dismiss a prompt without answering (counts as a denial).
