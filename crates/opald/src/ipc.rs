@@ -42,7 +42,7 @@ impl opal_kit::ipc::Service for App {
     /// snapshot and counts (what the bar gem needs), nothing an app asked
     /// to sign, no notification content, no offers.
     fn filter_event(&self, peer: &Peer, event: &IpcEvent) -> Option<IpcEvent> {
-        if peer.session.is_privileged() {
+        if self.session_privileged(&peer.session) {
             return Some(event.clone());
         }
         match event.event.as_str() {
