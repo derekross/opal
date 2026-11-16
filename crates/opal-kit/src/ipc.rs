@@ -44,18 +44,35 @@ pub struct Peer {
 }
 
 /// Per-connection state. `privileged` means whatever the daemon says it does.
+///
+/// A connection becomes privileged by showing the daemon's UI session token
+/// and stays privileged only while that token is still the daemon's —
+/// rotating the token (the daemon does when the first account is created)
+/// un-privileges every connection at once.
 #[derive(Debug, Default)]
 pub struct Session {
-    privileged: std::sync::atomic::AtomicBool,
+    token: std::sync::Mutex<Option<zeroize::Zeroizing<String>>>,
 }
 
 impl Session {
-    pub fn is_privileged(&self) -> bool {
-        self.privileged.load(std::sync::atomic::Ordering::Relaxed)
+    /// Does this connection hold `token`, compared in constant time?
+    pub fn is_privileged(&self, token: &str) -> bool {
+        let t = self.token.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(held) = t.as_deref() else {
+            return false;
+        };
+        held.len() == token.len()
+            && held
+                .bytes()
+                .zip(token.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
     }
-    pub fn set_privileged(&self) {
-        self.privileged
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    /// Mark the connection privileged: it showed the daemon's token.
+    pub fn set_privileged(&self, token: &str) {
+        *self.token.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(zeroize::Zeroizing::new(token.to_string()));
     }
 }
 

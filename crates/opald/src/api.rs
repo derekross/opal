@@ -69,9 +69,9 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
     if let Some(t) = &presented
         && app.ui_token_ok(t).await
     {
-        peer.session.set_privileged();
+        peer.session.set_privileged(t);
     }
-    if !open_method(method) && !peer.session.is_privileged() && app.ui_required().await {
+    if !open_method(method) && !app.session_privileged(&peer.session) && app.ui_required().await {
         bail!("{NEEDS_UI}");
     }
     match method {
@@ -83,8 +83,8 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             let p: Passphrase = parse(params)?;
             app.vault.unlock(&p.passphrase).await?;
             app.touch().await;
-            peer.session.set_privileged();
             let token = app.issue_ui_token().await;
+            peer.session.set_privileged(token.as_str());
             app.emit_state().await;
             Ok(json!({"locked": false, "ui_token": token.as_str()}))
         }
@@ -96,8 +96,8 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 .verify_passphrase(&p.passphrase)
                 .await
                 .map_err(|e| anyhow!("{e}"))?;
-            peer.session.set_privileged();
             let token = app.issue_ui_token().await;
+            peer.session.set_privileged(token.as_str());
             Ok(json!({"ui_token": token.as_str()}))
         }
         "lock" => {
@@ -118,7 +118,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
 
         // ── Accounts ────────────────────────────────────────────────────
         "accounts.list" => Ok(app.status().await["accounts"].clone()),
-        "accounts.add" => accounts_add(app, params).await,
+        "accounts.add" => accounts_add(app, &peer, params).await,
         "accounts.remove" => {
             #[derive(Deserialize)]
             struct P {
@@ -1205,7 +1205,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
     }
 }
 
-async fn accounts_add(app: &Arc<App>, params: Value) -> Result<Value> {
+async fn accounts_add(app: &Arc<App>, peer: &Peer, params: Value) -> Result<Value> {
     #[derive(Deserialize)]
     struct P {
         /// nsec, hex, ncryptsec or recovery phrase; omit to generate a key.
@@ -1253,11 +1253,21 @@ async fn accounts_add(app: &Arc<App>, params: Value) -> Result<Value> {
         app.vault.unlock(&p.passphrase).await?;
         app.touch().await;
     }
+    let mut r = json!({"pubkey": pk.to_hex(), "npub": pk.to_bech32()?});
+    if first {
+        // Now that a passphrase exists, anything authorized while there
+        // was nothing to protect — shown tokens and privileged
+        // connections — loses its authority. The connection that just
+        // created the account re-qualifies through the fresh token.
+        let token = app.rotate_ui_token();
+        peer.session.set_privileged(token.as_str());
+        r["ui_token"] = json!(token.as_str());
+    }
     crate::modules::reconcile(app).await;
     app.emit_state().await;
     let app2 = app.clone();
     tokio::spawn(async move { profiles::refresh(&app2, &[pk]).await });
-    Ok(json!({"pubkey": pk.to_hex(), "npub": pk.to_bech32()?}))
+    Ok(r)
 }
 
 /// nostrconnect relays must be proper TLS relays, not local or plain ones.
@@ -1573,7 +1583,7 @@ mod tests {
         let them = Keys::generate().public_key();
         let r = call(
             &app,
-            &ui(),
+            &ui(&app).await,
             "notifications.mute",
             json!({"pubkey": them.to_bech32().unwrap()}),
         )
@@ -1585,7 +1595,7 @@ mod tests {
             app.config.read().await.notifications.blocked,
             vec![them.to_hex()]
         );
-        let list = call(&app, &ui(), "notifications.mutes", json!(null))
+        let list = call(&app, &ui(&app).await, "notifications.mutes", json!(null))
             .await
             .unwrap();
         assert_eq!(list[0]["pubkey"], them.to_hex());
@@ -1594,7 +1604,7 @@ mod tests {
         // Muting twice doesn't add twice; unmuting takes it off.
         call(
             &app,
-            &ui(),
+            &ui(&app).await,
             "notifications.mute",
             json!({"pubkey": them.to_hex()}),
         )
@@ -1603,7 +1613,7 @@ mod tests {
         assert_eq!(app.config.read().await.notifications.blocked.len(), 1);
         call(
             &app,
-            &ui(),
+            &ui(&app).await,
             "notifications.unmute",
             json!({"pubkey": them.to_hex()}),
         )
@@ -1625,9 +1635,10 @@ mod tests {
 
     /// The shell after it showed the UI session token (any process may
     /// reach the socket; only a signed-in connection may do these things).
-    fn ui() -> Peer {
+    async fn ui(app: &Arc<App>) -> Peer {
+        let t = app.issue_ui_token().await;
         let p = Peer::default();
-        p.session.set_privileged();
+        p.session.set_privileged(t.as_str());
         p
     }
 
@@ -1659,7 +1670,9 @@ mod tests {
 
     async fn wait_for_offer(app: &Arc<App>) -> Value {
         for _ in 0..100 {
-            let offers = call(app, &ui(), "app.offers", json!(null)).await.unwrap();
+            let offers = call(app, &ui(&app).await, "app.offers", json!(null))
+                .await
+                .unwrap();
             if let Some(o) = offers.as_array().and_then(|a| a.first()) {
                 return o.clone();
             }
@@ -1692,7 +1705,7 @@ mod tests {
         assert_eq!(offer["account_label"], json!("Me"));
         let accepted = call(
             app,
-            &ui(),
+            &ui(&app).await,
             "app.accept",
             json!({"offer_id": offer["id"], "policy": policy, "grant": grant}),
         )
@@ -1736,7 +1749,9 @@ mod tests {
         );
 
         // And the panel can still read it back after signing in.
-        let c = call(&app, &ui(), "config.get", json!(null)).await.unwrap();
+        let c = call(&app, &ui(&app).await, "config.get", json!(null))
+            .await
+            .unwrap();
         assert_eq!(c["identity"]["bunker_uri"], json!(uri));
     }
 
@@ -1769,15 +1784,22 @@ mod tests {
         assert_eq!(status["name"], json!("Peridot"));
         assert_eq!(status["policy"], json!("manual"));
 
-        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
-        assert_eq!(apps[0]["kind"], json!("local"));
-        assert_eq!(apps[0]["exe"], json!(exe));
-        let get = call(&app, &ui(), "apps.get", json!({"id": apps[0]["id"]}))
+        let apps = call(&app, &ui(&app).await, "apps.list", json!(null))
             .await
             .unwrap();
+        assert_eq!(apps[0]["kind"], json!("local"));
+        assert_eq!(apps[0]["exe"], json!(exe));
+        let get = call(
+            &app,
+            &ui(&app).await,
+            "apps.get",
+            json!({"id": apps[0]["id"]}),
+        )
+        .await
+        .unwrap();
         assert_eq!(get["rules"].as_array().unwrap().len(), 1);
 
-        let activity = call(&app, &ui(), "activity.list", json!(null))
+        let activity = call(&app, &ui(&app).await, "activity.list", json!(null))
             .await
             .unwrap();
         assert_eq!(activity[0]["app_name"], json!("Peridot"));
@@ -1813,7 +1835,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
-        let err = sign(ui(), token.clone(), 30078).await.unwrap_err();
+        let err = sign(ui(&app).await, token.clone(), 30078)
+            .await
+            .unwrap_err();
         assert!(err.starts_with("paired with a different program"), "{err}");
         let err = sign(unit_peer("peridot.service"), token.clone(), 30078)
             .await
@@ -1849,7 +1873,9 @@ mod tests {
             connect_params_dm(),
         )
         .await;
-        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
+        let apps = call(&app, &ui(&app).await, "apps.list", json!(null))
+            .await
+            .unwrap();
         assert_eq!(apps[0]["dm"], json!(true));
         assert_eq!(apps[0]["nip44"], json!(true));
         let nip44 = |op: &str, content: String, pubkey: Option<String>| {
@@ -1914,7 +1940,7 @@ mod tests {
                         assert_eq!(prompt.request.method, Method::Nip44Decrypt);
                         call(
                             &app,
-                            &ui(),
+                            &ui(&app).await,
                             "prompts.answer",
                             json!({"id": prompt.id, "allow": true}),
                         )
@@ -1943,7 +1969,7 @@ mod tests {
         assert_eq!(offer["unit"], json!("peridot.service"));
         call(
             &app,
-            &ui(),
+            &ui(&app).await,
             "app.accept",
             json!({"offer_id": offer["id"], "policy": "basic", "grant": ["sign_event:30078"]}),
         )
@@ -1970,7 +1996,9 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("peridot.service"), "{err}");
-        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
+        let apps = call(&app, &ui(&app).await, "apps.list", json!(null))
+            .await
+            .unwrap();
         assert_eq!(apps[0]["unit"], json!("peridot.service"));
     }
 
@@ -1990,15 +2018,22 @@ mod tests {
             err.to_string(),
             "that app is already waiting for your approval"
         );
-        let r = call(&app, &ui(), "app.reject", json!({"id": offer["id"]}))
-            .await
-            .unwrap();
+        let r = call(
+            &app,
+            &ui(&app).await,
+            "app.reject",
+            json!({"id": offer["id"]}),
+        )
+        .await
+        .unwrap();
         assert_eq!(r["removed"], json!(true));
         assert_eq!(connect.await.unwrap().unwrap_err().to_string(), "declined");
-        let offers = call(&app, &ui(), "app.offers", json!(null)).await.unwrap();
+        let offers = call(&app, &ui(&app).await, "app.offers", json!(null))
+            .await
+            .unwrap();
         assert!(offers.as_array().unwrap().is_empty());
         assert!(
-            call(&app, &ui(), "apps.list", json!(null))
+            call(&app, &ui(&app).await, "apps.list", json!(null))
                 .await
                 .unwrap()
                 .as_array()
@@ -2040,10 +2075,17 @@ mod tests {
         let (app, _) = test_app().await;
         let exe = "/x/peridotd";
         let token = pair(&app, exe, "basic", vec![]).await;
-        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
-        let r = call(&app, &ui(), "apps.remove", json!({"id": apps[0]["id"]}))
+        let apps = call(&app, &ui(&app).await, "apps.list", json!(null))
             .await
             .unwrap();
+        let r = call(
+            &app,
+            &ui(&app).await,
+            "apps.remove",
+            json!({"id": apps[0]["id"]}),
+        )
+        .await
+        .unwrap();
         assert_eq!(r["removed"], json!(true));
         let err = call(&app, &peer(exe), "app.status", json!({"token": token}))
             .await
@@ -2060,14 +2102,14 @@ mod tests {
         // a local one, and both go through this method.
         let remote = call(
             &app,
-            &ui(),
+            &ui(&app).await,
             "apps.create_bunker",
             json!({"name": "Peridot Remote"}),
         )
         .await
         .unwrap();
         let remote_id = remote["app"]["id"].as_str().unwrap().to_string();
-        let local_id = call(&app, &ui(), "apps.list", json!(null))
+        let local_id = call(&app, &ui(&app).await, "apps.list", json!(null))
             .await
             .unwrap()
             .as_array()
@@ -2096,13 +2138,13 @@ mod tests {
 
         // A name alone changes the display name and nothing else.
         for id in [local_id.clone(), remote_id.clone()] {
-            let before = call(&app, &ui(), "apps.get", json!({"id": id}))
+            let before = call(&app, &ui(&app).await, "apps.get", json!({"id": id}))
                 .await
                 .unwrap()["app"]["policy"]
                 .clone();
             let r = call(
                 &app,
-                &ui(),
+                &ui(&app).await,
                 "apps.update",
                 json!({"id": id, "name": "Renamed"}),
             )
@@ -2115,7 +2157,7 @@ mod tests {
         // Full trust still asks for the passphrase.
         let err = call(
             &app,
-            &ui(),
+            &ui(&app).await,
             "apps.update",
             json!({"id": local_id, "policy": "full-trust"}),
         )
@@ -2141,7 +2183,7 @@ mod tests {
                         assert_eq!(prompt.request.kind, Some(24242));
                         call(
                             &app,
-                            &ui(),
+                            &ui(&app).await,
                             "prompts.answer",
                             json!({"id": prompt.id, "allow": true}),
                         )
@@ -2163,7 +2205,7 @@ mod tests {
         .unwrap();
         assert!(signed["sig"].is_string());
         assert!(answerer.await.unwrap(), "a prompt was shown");
-        let activity = call(&app, &ui(), "activity.list", json!(null))
+        let activity = call(&app, &ui(&app).await, "activity.list", json!(null))
             .await
             .unwrap();
         assert_eq!(activity[0]["source"], json!("user"));
@@ -2195,7 +2237,7 @@ mod tests {
                 for remember in ["1d", "1w", "always"] {
                     let err = call(
                         &app,
-                        &ui(),
+                        &ui(&app).await,
                         "prompts.answer",
                         answer(json!({"remember": remember})),
                     )
@@ -2209,7 +2251,7 @@ mod tests {
                 }
                 let err = call(
                     &app,
-                    &ui(),
+                    &ui(&app).await,
                     "prompts.answer",
                     answer(json!({"remember": "always", "passphrase": "nope"})),
                 )
@@ -2219,7 +2261,7 @@ mod tests {
                 assert_eq!(app.prompts.pending().len(), 1, "still waiting");
                 let r = call(
                     &app,
-                    &ui(),
+                    &ui(&app).await,
                     "prompts.answer",
                     answer(json!({"remember": "always", "passphrase": PW})),
                 )
@@ -2241,17 +2283,24 @@ mod tests {
         answerer.await.unwrap();
         // Saved without an expiry, for that kind only; the next one is
         // signed without asking.
-        let apps = call(&app, &ui(), "apps.list", json!(null)).await.unwrap();
-        let detail = call(&app, &ui(), "apps.get", json!({"id": apps[0]["id"]}))
+        let apps = call(&app, &ui(&app).await, "apps.list", json!(null))
             .await
             .unwrap();
+        let detail = call(
+            &app,
+            &ui(&app).await,
+            "apps.get",
+            json!({"id": apps[0]["id"]}),
+        )
+        .await
+        .unwrap();
         let rules = detail["rules"].as_array().unwrap();
         assert_eq!(rules.len(), 1, "{rules:?}");
         assert_eq!(rules[0]["kind"], json!(24242));
         assert_eq!(rules[0]["allow"], json!(true));
         assert_eq!(rules[0]["until"], Value::Null);
         sign().await.unwrap();
-        let activity = call(&app, &ui(), "activity.list", json!(null))
+        let activity = call(&app, &ui(&app).await, "activity.list", json!(null))
             .await
             .unwrap();
         assert_eq!(activity[0]["source"], json!("rule"));
@@ -2276,7 +2325,9 @@ mod tests {
                     };
                     let mut p = answer;
                     p["id"] = json!(prompt.id);
-                    call(&app, &ui(), "prompts.answer", p).await.unwrap()
+                    call(&app, &ui(&app).await, "prompts.answer", p)
+                        .await
+                        .unwrap()
                 })
             };
             let _ = call(
@@ -2313,7 +2364,7 @@ mod tests {
         for id in ["not-installed-anywhere.desktop", "", "../../evil.desktop"] {
             let err = call(
                 &app,
-                &ui(),
+                &ui(&app).await,
                 "notifications.set_default_app",
                 json!({"id": id}),
             )
@@ -2369,7 +2420,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.to_string(), NEEDS_UI);
-        assert!(!stranger.session.is_privileged());
+        assert!(!app.session_privileged(&stranger.session));
         // The wrong passphrase gives no token.
         assert!(
             call(
@@ -2390,7 +2441,7 @@ mod tests {
             .to_string();
         assert_eq!(token.len(), 64);
         assert!(
-            stranger.session.is_privileged(),
+            app.session_privileged(&stranger.session),
             "proving the passphrase signs the connection in"
         );
         let other = Peer::default();
@@ -2399,7 +2450,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        assert!(other.session.is_privileged());
+        assert!(app.session_privileged(&other.session));
         // The open methods never needed it.
         assert!(
             call(&app, &Peer::default(), "status", json!(null))
@@ -2424,7 +2475,7 @@ mod tests {
             .unwrap();
         assert_eq!(r["locked"], json!(false));
         assert_eq!(r["ui_token"].as_str().map(str::len), Some(64));
-        assert!(shell.session.is_privileged());
+        assert!(app.session_privileged(&shell.session));
         assert!(
             call(&app, &shell, "prompts.list", json!(null))
                 .await
@@ -2460,6 +2511,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn setup_revokes_authority_granted_before_a_passphrase_existed() {
+        let mut config = Config::default();
+        config.modules.signer = true;
+        config.signer.relays = vec![];
+        let app = App::new(Options {
+            config,
+            config_path: PathBuf::from("/nonexistent/opal.toml"),
+            db: Db::open_in_memory().unwrap(),
+            store: SecretStore::memory(),
+            vault_log_n: Some(4),
+        })
+        .await
+        .unwrap();
+
+        // Before setup there is nothing to protect, so the socket is
+        // open and a connection can show the UI token as it pleases.
+        let stranger = Peer::default();
+        let old = app.issue_ui_token().await.as_str().to_owned();
+        stranger.session.set_privileged(&old);
+        assert!(app.session_privileged(&stranger.session));
+        assert!(
+            call(&app, &stranger, "apps.list", json!(null))
+                .await
+                .is_ok()
+        );
+
+        // The first account is created over its own connection.
+        let shell = Peer::default();
+        let r = call(
+            &app,
+            &shell,
+            "accounts.add",
+            json!({"passphrase": "Xk9#mP2$vL8!nQ4&rT7"}),
+        )
+        .await
+        .unwrap();
+
+        // What the stranger held — the shown token and its privileged
+        // session — stops working the moment a passphrase exists.
+        assert!(!app.ui_token_ok(&old).await);
+        assert!(!app.session_privileged(&stranger.session));
+        assert_eq!(
+            call(&app, &stranger, "apps.list", json!(null))
+                .await
+                .unwrap_err()
+                .to_string(),
+            NEEDS_UI
+        );
+
+        // The creating connection re-qualifies through the fresh token
+        // handed back in the response.
+        let fresh = r["ui_token"].as_str().unwrap();
+        assert_ne!(fresh, old);
+        assert!(app.ui_token_ok(fresh).await);
+        assert!(app.session_privileged(&shell.session));
+        assert!(call(&app, &shell, "apps.list", json!(null)).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn events_are_redacted_until_the_connection_signs_in() {
         use opal_kit::ipc::Service;
         let (app, _) = test_app().await;
@@ -2478,7 +2588,9 @@ mod tests {
         assert!(app.filter_event(&stranger, &ev("state")).is_some());
         assert!(app.filter_event(&stranger, &ev("pending")).is_some());
         assert!(app.filter_event(&stranger, &ev("unread")).is_some());
-        stranger.session.set_privileged();
+        stranger
+            .session
+            .set_privileged(app.issue_ui_token().await.as_str());
         assert!(app.filter_event(&stranger, &ev("prompt")).is_some());
     }
 

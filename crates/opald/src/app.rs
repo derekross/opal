@@ -22,6 +22,7 @@ use opal_signer::{
     SignerStore, kinds,
 };
 use serde_json::{Value, json};
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 use zeroize::Zeroizing;
 
@@ -120,7 +121,7 @@ pub struct App {
     /// required for anything that grants authority or shows content. Any
     /// process running as the user can reach the socket; only one that
     /// knows the passphrase (or is the UI that asked for it) gets this.
-    ui_token: Mutex<Option<Zeroizing<String>>>,
+    ui_token: StdMutex<Option<Zeroizing<String>>>,
     /// The running notifications module and what it was started with.
     pub notify: Mutex<Option<(NotifyEngine, String)>>,
 }
@@ -192,22 +193,31 @@ impl App {
             status: Mutex::new(None),
             bunker: Mutex::new(None),
             status_blocked: Mutex::new(None),
-            ui_token: Mutex::new(None),
+            ui_token: StdMutex::new(None),
         }))
     }
 
     /// The UI session token, minted on first use (per daemon lifetime).
     pub async fn issue_ui_token(&self) -> Zeroizing<String> {
-        let mut t = self.ui_token.lock().await;
+        let mut t = self.ui_token.lock().unwrap_or_else(|p| p.into_inner());
         if t.is_none() {
             *t = Some(Zeroizing::new(opal_signer::server::random_hex(32)));
         }
         t.clone().expect("just set")
     }
 
+    /// Swap the UI session token for a fresh one. Everything authorized
+    /// under the old token — presented tokens and privileged connections —
+    /// loses its authority at once.
+    pub fn rotate_ui_token(&self) -> Zeroizing<String> {
+        let mut t = self.ui_token.lock().unwrap_or_else(|p| p.into_inner());
+        *t = Some(Zeroizing::new(opal_signer::server::random_hex(32)));
+        t.clone().expect("just set")
+    }
+
     /// Is `token` the UI session token? Compared in constant time.
     pub async fn ui_token_ok(&self, token: &str) -> bool {
-        let t = self.ui_token.lock().await;
+        let t = self.ui_token.lock().unwrap_or_else(|p| p.into_inner());
         let Some(real) = t.as_deref() else {
             return false;
         };
@@ -217,6 +227,16 @@ impl App {
                 .zip(token.bytes())
                 .fold(0u8, |acc, (a, b)| acc | (a ^ b))
                 == 0
+    }
+
+    /// Is this connection privileged right now? It holds that only while
+    /// the token it showed is still the daemon's token.
+    pub fn session_privileged(&self, session: &opal_kit::ipc::Session) -> bool {
+        let t = self.ui_token.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(cur) = t.as_deref() else {
+            return false;
+        };
+        session.is_privileged(cur)
     }
 
     /// Do privileged socket methods need the token? Only once there is a
