@@ -492,7 +492,7 @@ mimeapps_remove_opal() {
     }
     { print }
     END { exit changed ? 0 : 3 }
-  ' "$MIMEAPPS" >"$tmp"; rc=$?
+  ' "$MIMEAPPS" >"$tmp" && rc=0 || rc=$?
   case $rc in
     0) chmod --reference="$MIMEAPPS" -- "$tmp" 2>/dev/null || true
        mv -T -- "$tmp" "$MIMEAPPS"
