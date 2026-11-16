@@ -109,7 +109,10 @@ pub async fn snapshot(picked: &str) -> Snapshot {
     {
         return snap.clone();
     }
-    let apps = tokio::task::spawn_blocking(scan).await.unwrap_or_default();
+    let apps = tokio::task::spawn_blocking(scan).await.unwrap_or_else(|e| {
+        tracing::warn!("Nostr app scan failed: {e}");
+        Vec::new()
+    });
     let snap = if apps.is_empty() {
         Snapshot::default()
     } else {
@@ -125,7 +128,10 @@ pub async fn snapshot(picked: &str) -> Snapshot {
 /// Make `id` the desktop's default for every Nostr scheme it handles. `id`
 /// must be one of the installed Nostr apps; anything else is refused.
 pub async fn set_default(id: &str) -> Result<NostrApp> {
-    let apps = tokio::task::spawn_blocking(scan).await.unwrap_or_default();
+    let apps = tokio::task::spawn_blocking(scan).await.unwrap_or_else(|e| {
+        tracing::warn!("Nostr app scan failed: {e}");
+        Vec::new()
+    });
     let Some(app) = apps.into_iter().find(|a| a.id == id) else {
         bail!("that app doesn't open Nostr links");
     };
