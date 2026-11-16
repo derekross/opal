@@ -271,9 +271,12 @@ Column {
     TextField {
       width: parent.width - parent.leftPadding
       placeholderText: "Custom client URL (https://…/e/ or ?open={nevent})"
-      text: {
+      // Set once, not bound: a live binding would wipe in-progress typing
+      // whenever the config refreshes for an unrelated change.
+      Component.onCompleted: {
         var c = parent.n.client || ""
-        return c.indexOf("/") !== -1 ? c : ""
+        if (c.indexOf("/") !== -1)
+          text = c
       }
       foreground: root.foreground
       onAccepted: {

@@ -453,7 +453,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 app_id: p.app_id,
                 allowed: p.allowed,
                 before_id: p.before_id,
-                limit: p.limit.unwrap_or(100),
+                limit: p.limit.unwrap_or(100).min(500),
             };
             Ok(json!(store(app)?.activity(&q)?))
         }
@@ -835,9 +835,9 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                     if app.vault.accounts().await?.is_empty() {
                         cfg.modules.notifications = false;
                     }
+                    cfg.identity.npub = None;
+                    cfg.identity.nip05 = None;
                 }
-                cfg.identity.npub = None;
-                cfg.identity.nip05 = None;
                 cfg.save_to(&app.config_path)?;
             }
             crate::modules::reconcile(app).await;
@@ -913,7 +913,8 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 return Ok(json!([]));
             };
             Ok(json!(
-                app.status_store.recent(&account, p.limit.unwrap_or(50))?
+                app.status_store
+                    .recent(&account, p.limit.unwrap_or(50).min(500))?
             ))
         }
         "scrobbles.stats" => {
@@ -969,9 +970,9 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 return Ok(json!([]));
             };
             let opener = notify_opener(app).await;
-            let list = app
-                .notify_store
-                .list(&account, p.limit.unwrap_or(100), p.before)?;
+            let list =
+                app.notify_store
+                    .list(&account, p.limit.unwrap_or(100).min(500), p.before)?;
             Ok(json!(
                 list.into_iter()
                     .map(|n| {
@@ -1253,16 +1254,25 @@ async fn accounts_add(app: &Arc<App>, params: Value) -> Result<Value> {
 fn check_relays(uri: &NostrConnectUri) -> Result<()> {
     for r in &uri.relays {
         let u = url::Url::parse(r.as_str())?;
-        let host = u.host_str().unwrap_or_default();
+        let raw_host = u.host_str().unwrap_or_default();
+        // url serializes IPv6 literals with brackets ("[fe80::1]") — strip them
+        // so they parse as IpAddr instead of slipping past the local check.
+        let host = raw_host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(raw_host);
         let local = host == "localhost"
             || host.ends_with(".local")
             || host
                 .parse::<std::net::IpAddr>()
                 .map(|ip| {
                     ip.is_loopback()
+                        || ip.is_unspecified()
                         || match ip {
                             std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
-                            std::net::IpAddr::V6(v6) => v6.is_unique_local(),
+                            std::net::IpAddr::V6(v6) => {
+                                v6.is_unique_local() || v6.is_unicast_link_local()
+                            }
                         }
                 })
                 .unwrap_or(false);
@@ -2359,5 +2369,46 @@ mod tests {
             base,
             json!({"modules": {"signer": true, "status": true}, "x": 1})
         );
+    }
+
+    const PK: &str = "fa984bd7dbb282f07e16e7ae87b26a2a7b9b90b7246a44771f0cf5ae58018f52";
+
+    fn uri_with_relay(relay: &str) -> NostrConnectUri {
+        NostrConnectUri::parse(&format!(
+            "nostrconnect://{PK}?relay={}&secret=s3cr3t",
+            relay
+                .replace(":", "%3A")
+                .replace("/", "%2F")
+                .replace("[", "%5B")
+                .replace("]", "%5D")
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn check_relays_rejects_local_and_unspecified() {
+        // Public relays pass.
+        assert!(check_relays(&uri_with_relay("wss://relay.example.com")).is_ok());
+
+        // Plain ws, loopback, RFC1918, link-local, unspecified and unique-local
+        // must all be refused — a nostrconnect URI can point the daemon at LAN
+        // endpoints it was never meant to dial. IPv6 literals arrive bracketed
+        // from url's host_str, so these cover the bracket-stripping path too.
+        for bad in [
+            "ws://relay.example.com",
+            "wss://localhost",
+            "wss://127.0.0.1",
+            "wss://10.0.0.1",
+            "wss://169.254.1.1",
+            "wss://0.0.0.0",
+            "wss://[::]",
+            "wss://[fd00::1]",
+            "wss://[fe80::1]",
+        ] {
+            assert!(
+                check_relays(&uri_with_relay(bad)).is_err(),
+                "relay {bad} should be rejected"
+            );
+        }
     }
 }
