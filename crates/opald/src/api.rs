@@ -29,6 +29,9 @@ const LOCAL_PAIR_TIMEOUT: Duration = Duration::from_secs(300);
 /// shell and the CLI look for this text and ask for the passphrase.
 pub const NEEDS_UI: &str = "sign in with your Opal passphrase first";
 
+/// Largest page a local caller may ask for on the list endpoints.
+const MAX_LIST_LIMIT: u32 = 500;
+
 /// Methods any process running as the user may call: state the bar gem
 /// shows, proving the passphrase, handing a link to the UI, and the
 /// paired-app calls that carry their own token. Everything else grants
@@ -464,7 +467,7 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 app_id: p.app_id,
                 allowed: p.allowed,
                 before_id: p.before_id,
-                limit: p.limit.unwrap_or(100),
+                limit: p.limit.unwrap_or(100).min(MAX_LIST_LIMIT),
             };
             Ok(json!(store(app)?.activity(&q)?))
         }
@@ -847,8 +850,13 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                         cfg.modules.notifications = false;
                     }
                 }
-                cfg.identity.npub = None;
-                cfg.identity.nip05 = None;
+                // npub/nip05 hold the watched profile — a local account can
+                // outlive one after accounts.select — except in External
+                // mode, where npub is the bunker's signer key.
+                if cfg.identity.mode != opal_core::config::IdentityMode::External {
+                    cfg.identity.npub = None;
+                    cfg.identity.nip05 = None;
+                }
                 cfg.save_to(&app.config_path)?;
             }
             crate::modules::reconcile(app).await;
@@ -923,9 +931,10 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
             let Some(account) = status_account(app).await else {
                 return Ok(json!([]));
             };
-            Ok(json!(
-                app.status_store.recent(&account, p.limit.unwrap_or(50))?
-            ))
+            Ok(json!(app.status_store.recent(
+                &account,
+                p.limit.unwrap_or(50).min(MAX_LIST_LIMIT)
+            )?))
         }
         "scrobbles.stats" => {
             let Some(account) = status_account(app).await else {
@@ -980,9 +989,11 @@ pub async fn dispatch(app: &Arc<App>, peer: &Peer, method: &str, params: Value) 
                 return Ok(json!([]));
             };
             let opener = notify_opener(app).await;
-            let list = app
-                .notify_store
-                .list(&account, p.limit.unwrap_or(100), p.before)?;
+            let list = app.notify_store.list(
+                &account,
+                p.limit.unwrap_or(100).min(MAX_LIST_LIMIT),
+                p.before,
+            )?;
             Ok(json!(
                 list.into_iter()
                     .map(|n| {
@@ -2490,5 +2501,54 @@ mod tests {
             base,
             json!({"modules": {"signer": true, "status": true}, "x": 1})
         );
+    }
+
+    /// Removing the watched profile works in Local mode too — a local key
+    /// can outlive it after accounts.select — but must keep the bunker's
+    /// npub in External mode.
+    #[tokio::test]
+    async fn unwatch_clears_the_watched_profile_only_outside_external() {
+        use opal_core::config::IdentityMode;
+        let dir = std::env::temp_dir().join(format!("opal-unwatch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        config.identity.mode = IdentityMode::Local;
+        config.identity.npub = Some("npub1alice".into());
+        config.identity.nip05 = Some("alice@example.com".into());
+        let app = Arc::new(
+            App::new(Options {
+                config,
+                config_path: dir.join("opal.toml"),
+                db: Db::open_in_memory().unwrap(),
+                store: SecretStore::memory(),
+                vault_log_n: Some(4),
+            })
+            .await
+            .unwrap(),
+        );
+
+        // Local mode: the saved watched profile is removed.
+        call(&app, &ui(), "identity.unwatch", json!({}))
+            .await
+            .unwrap();
+        {
+            let cfg = app.config.read().await;
+            assert!(cfg.identity.npub.is_none());
+            assert!(cfg.identity.nip05.is_none());
+            assert_eq!(cfg.identity.mode, IdentityMode::Local);
+        }
+
+        // External mode: npub is the bunker's — it survives.
+        {
+            let mut cfg = app.config.write().await;
+            cfg.identity.mode = IdentityMode::External;
+            cfg.identity.npub = Some("npub1bunker".into());
+        }
+        call(&app, &ui(), "identity.unwatch", json!({}))
+            .await
+            .unwrap();
+        let cfg = app.config.read().await;
+        assert_eq!(cfg.identity.npub.as_deref(), Some("npub1bunker"));
+        assert_eq!(cfg.identity.mode, IdentityMode::External);
     }
 }
